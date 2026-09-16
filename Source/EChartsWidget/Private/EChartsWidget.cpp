@@ -605,16 +605,20 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			{
 				bIsDirty = false;
 			}
-			OnEChartsApplied.Broadcast(MessageRevision, MessagePointCount);
 			if (DataTableLoadState == EEChartsDataTableLoadState::Applying && MessageRevision == DataTableApplyRevision)
 			{
+				const int32 Succeeded = RowsSucceeded;
+				const int32 Skipped = RowsSkipped;
+				++DataTableRequest;
 				DataTableLoadState = EEChartsDataTableLoadState::Completed;
+				bApplyRequested = false;
 				DataTableApplyRevision = 0;
 				DataTablePayloadBase64.Reset();
 				DataTablePreviousSeries = {};
 				bHasDataTableCacheSnapshot = false;
-				OnDataTableLoaded.Broadcast(RowsSucceeded, RowsSkipped);
+				OnDataTableLoaded.Broadcast(Succeeded, Skipped);
 			}
+			OnEChartsApplied.Broadcast(MessageRevision, MessagePointCount);
 			if (bApplyRequested && bIsDirty)
 			{
 				SubmitLatestData();

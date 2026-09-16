@@ -14,17 +14,33 @@ public:
 	UFUNCTION()
 	void HandleTableProgress(int32 Processed, int32 Total)
 	{
+		if (TableProgressFrame != GFrameCounter) { TableProgressFrame = GFrameCounter; TableRowsThisFrame = 0; }
+		TableRowsThisFrame += Processed - LastTableProcessed;
+		MaxTableRowsPerFrame = FMath::Max(MaxTableRowsPerFrame, TableRowsThisFrame);
 		++TableProgressCount;
 		MaxTableBatch = FMath::Max(MaxTableBatch, Processed - LastTableProcessed);
 		LastTableProcessed = Processed;
 		bTableEventsOnGameThread &= IsInGameThread();
 		if (TableTemplateChangeWidget.IsValid()) TableTemplateChangeWidget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap);
+		if (TableRestartWidget.IsValid() && TableRestartsRemaining > 0)
+		{
+			--TableRestartsRemaining;
+			LastTableProcessed = 0;
+			TableRestartWidget->LoadDataTable(7);
+		}
 	}
 	UFUNCTION()
 	void HandleTableLoaded(int32 Succeeded, int32 Skipped)
 	{
 		++TableLoadedCount;
 		bTableEventsOnGameThread &= IsInGameThread();
+		if (LoadedMutationWidget.IsValid())
+		{
+			UEChartsWidget* Widget = LoadedMutationWidget.Get();
+			LoadedMutationWidget.Reset();
+			if (bRestartOnApplied) Widget->LoadDataTable(1);
+			else Widget->AddDataPoint(0, 99, 99);
+		}
 	}
 	UFUNCTION()
 	void HandleTableCancelled() { ++TableCancelledCount; bTableEventsOnGameThread &= IsInGameThread(); }
@@ -35,6 +51,14 @@ public:
 	int32 TableCancelledCount = 0;
 	bool bTableEventsOnGameThread = true;
 	TWeakObjectPtr<UEChartsWidget> TableTemplateChangeWidget;
+	TWeakObjectPtr<UEChartsWidget> TableRestartWidget;
+	int32 TableRestartsRemaining = 0;
+	uint64 TableProgressFrame = MAX_uint64;
+	int32 TableRowsThisFrame = 0;
+	int32 MaxTableRowsPerFrame = 0;
+	TWeakObjectPtr<UEChartsWidget> AppliedMutationWidget;
+	TWeakObjectPtr<UEChartsWidget> LoadedMutationWidget;
+	bool bRestartOnApplied = false;
 	UFUNCTION()
 	void HandleReady()
 	{
@@ -107,6 +131,13 @@ public:
 		++AppliedCount;
 		LastAppliedRevision = Revision;
 		LastAppliedPointCount = PointCount;
+		if (AppliedMutationWidget.IsValid())
+		{
+			UEChartsWidget* Widget = AppliedMutationWidget.Get();
+			AppliedMutationWidget.Reset();
+			if (bRestartOnApplied) Widget->LoadDataTable(1);
+			else Widget->AddDataPoint(0, 99, 99);
+		}
 	}
 
 	int32 ReadyCount = 0;

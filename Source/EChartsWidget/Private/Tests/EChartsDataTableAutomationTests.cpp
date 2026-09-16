@@ -119,7 +119,13 @@ bool FEChartsDataTableBudgetTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Repeated cancel does not broadcast"), Sink->TableCancelledCount, 1);
 	Widget->LoadDataTable(0);
 	FTSTicker::GetCoreTicker().Tick(0.01f);
-	TestEqual(TEXT("Lower budget clamps to one"), Widget->RowsProcessed, 1);
+	TestEqual(TEXT("Same-frame restart cannot read another batch"), Widget->RowsProcessed, 0);
+	TStrongObjectPtr<UEChartsWidget> ClampWidget(NewObject<UEChartsWidget>());
+	ClampWidget->SetDataTableMapping(Table, Mapping);
+	ClampWidget->LoadDataTable(0);
+	FTSTicker::GetCoreTicker().Tick(0.01f);
+	TestEqual(TEXT("Lower budget clamps to one"), ClampWidget->RowsProcessed, 1);
+	ClampWidget->ReleaseSlateResources(false);
 	Widget->ReleaseSlateResources(false);
 	FTSTicker::GetCoreTicker().Tick(0.01f);
 	TestEqual(TEXT("Release cancels"), Widget->DataTableLoadState, EEChartsDataTableLoadState::Cancelled);
@@ -646,6 +652,123 @@ bool FEChartsCEFTemplateCancellationTest::RunTest(const FString& Parameters)
 {
 	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI"))) return true;
 	ADD_LATENT_AUTOMATION_COMMAND(FEChartsTemplateCancellationCommand(this, true, false));
+	return true;
+}
+class FEChartsRepeatedProgressRestartCommand : public IAutomationLatentCommand
+{
+	FAutomationTestBase* Test;
+	TStrongObjectPtr<UEChartsWidget> W;
+	TStrongObjectPtr<UEChartsWidgetTestSink> Sink;
+	double Start = 0;
+public:
+	explicit FEChartsRepeatedProgressRestartCommand(FAutomationTestBase* T) : Test(T) {}
+	virtual bool Update() override
+	{
+		if (!W.IsValid())
+		{
+			Start=FPlatformTime::Seconds(); W.Reset(NewObject<UEChartsWidget>()); Sink.Reset(NewObject<UEChartsWidgetTestSink>());
+			UDataTable* T=NewObject<UDataTable>(); T->RowStruct=FEChartsDataTableTestRow::StaticStruct();
+			for (int32 I=0; I<100; ++I) T->AddRow(FName(*FString::FromInt(I)), FEChartsDataTableTestRow());
+			FEChartsDataTableMapping M; M.X=TEXT("X"); M.Y=TEXT("Y"); W->SetDataTableMapping(T,M);
+			Sink->TableRestartWidget=W.Get(); Sink->TableRestartsRemaining=32;
+			W->OnDataTableLoadProgress.AddDynamic(Sink.Get(), &UEChartsWidgetTestSink::HandleTableProgress);
+			W->LoadDataTable(7); return false;
+		}
+		if (FPlatformTime::Seconds()-Start>10) { Test->AddError(TEXT("Deferred progress restarts never resumed")); W->ReleaseSlateResources(false); return true; }
+		if (Sink->TableProgressCount<33) return false;
+		Test->TestEqual(TEXT("All 32 callback restarts resume on later frames"), Sink->TableRestartsRemaining, 0);
+		Test->TestEqual(TEXT("Every frame retains the same seven-row budget"), Sink->MaxTableRowsPerFrame, 7);
+		W->ReleaseSlateResources(false); return true;
+	}
+};
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsReentrantFrameBudgetTest, "EChartsWidget.DataTable.ReentrantFrameBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsReentrantFrameBudgetTest::RunTest(const FString& Parameters)
+{
+	for (int32 Restarts : {1, 32})
+	{
+		TStrongObjectPtr<UEChartsWidget> W(NewObject<UEChartsWidget>());
+		TStrongObjectPtr<UEChartsWidgetTestSink> S(NewObject<UEChartsWidgetTestSink>());
+		UDataTable* T = NewObject<UDataTable>(); T->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+		for (int32 I = 0; I < 100; ++I) T->AddRow(FName(*FString::FromInt(I)), FEChartsDataTableTestRow());
+		FEChartsDataTableMapping M; M.X = TEXT("X"); M.Y = TEXT("Y"); W->SetDataTableMapping(T, M);
+		S->TableRestartWidget = W.Get(); S->TableRestartsRemaining = Restarts;
+		W->OnDataTableLoadProgress.AddDynamic(S.Get(), &UEChartsWidgetTestSink::HandleTableProgress);
+		W->LoadDataTable(7);
+		const double Start = FPlatformTime::Seconds();
+		FTSTicker::GetCoreTicker().Tick(0.01f);
+		TestTrue(TEXT("Restarting progress callbacks return within a bounded tick"), FPlatformTime::Seconds() - Start < 1.0);
+		TestEqual(TEXT("One frame processes only one batch across requests"), S->MaxTableRowsPerFrame, 7);
+		TestEqual(TEXT("New request never reports progress in same tick"), S->TableProgressCount, 1);
+		TestEqual(TEXT("Restarts are deferred to later frames"), S->TableRestartsRemaining, Restarts - 1);
+		FTSTicker::GetCoreTicker().Tick(0.01f);
+		TestEqual(TEXT("Second tick in same engine frame still respects budget"), S->TableProgressCount, 1);
+		W->ReleaseSlateResources(false);
+	}
+	ADD_LATENT_AUTOMATION_COMMAND(FEChartsRepeatedProgressRestartCommand(this));
+	return true;
+}
+
+class FEChartsAppliedReentrancyCommand : public IAutomationLatentCommand
+{
+	FAutomationTestBase* Test; bool bRestart; bool bLoadedCallback;
+	TStrongObjectPtr<UEChartsWidget> W;
+	TStrongObjectPtr<UEChartsWidgetTestSink> Sink;
+	double Start=0; bool bFirstAcknowledged=false;
+public:
+	FEChartsAppliedReentrancyCommand(FAutomationTestBase* T, bool bInRestart, bool bInLoadedCallback = false)
+		: Test(T), bRestart(bInRestart), bLoadedCallback(bInLoadedCallback) {}
+	virtual bool Update() override
+	{
+		if (!W.IsValid())
+		{
+			Start=FPlatformTime::Seconds(); W.Reset(NewObject<UEChartsWidget>()); Sink.Reset(NewObject<UEChartsWidgetTestSink>());
+			TArray<FEChartsDataPoint2D> Large; Large.SetNum(90000); W->SetSeriesData(0, Large);
+			W->SetSeriesData(1, {{11, 12}}); W->SetSeriesData(2, {{21, 22}});
+			W->InitializeECharts();
+			UDataTable* Table=NewObject<UDataTable>(); Table->RowStruct=FEChartsDataTableTestRow::StaticStruct();
+			FEChartsDataTableTestRow Row; Row.X=1; Row.Y=2; Table->AddRow(TEXT("A"), Row);
+			FEChartsDataTableMapping M; M.X=TEXT("X"); M.Y=TEXT("Y"); W->SetDataTableMapping(Table, M);
+			if (bLoadedCallback) Sink->LoadedMutationWidget=W.Get();
+			else Sink->AppliedMutationWidget=W.Get();
+			Sink->bRestartOnApplied=bRestart;
+			W->OnEChartsApplied.AddDynamic(Sink.Get(), &UEChartsWidgetTestSink::HandleApplied);
+			W->OnDataTableLoaded.AddDynamic(Sink.Get(), &UEChartsWidgetTestSink::HandleTableLoaded);
+			W->LoadDataTable(1); return false;
+		}
+		if (FPlatformTime::Seconds()-Start>10) { Test->AddError(TEXT("Applied callback reentrancy timeout")); W->ReleaseSlateResources(false); return true; }
+		if (W->DataTableLoadState!=EEChartsDataTableLoadState::Applying) return false;
+		if (!bFirstAcknowledged)
+		{
+			Test->TestEqual(TEXT("Worker snapshot excludes 90k overwritten Series0"), W->GetDataTableWorkerSnapshotPointCountForTesting(), 2);
+			Test->TestEqual(TEXT("Other series 1 remains intact"), W->GetSeriesData(1)[0].Y, 12.0);
+			Test->TestEqual(TEXT("Other series 2 remains intact"), W->GetSeriesData(2)[0].Y, 22.0);
+			W->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+			W->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:1:5:3"), FString(), 0);
+			Test->TestEqual(TEXT("Old request Loaded survives generic callback mutation"), Sink->TableLoadedCount, 1);
+			Test->TestEqual(TEXT("Callback never rolls back the accepted Series0"), W->GetSeriesData(0).Num(), bRestart ? 1 : 2);
+			if (!bRestart)
+			{
+				Test->TestEqual(TEXT("Generic AddDataPoint preserves completed load"), W->DataTableLoadState, EEChartsDataTableLoadState::Completed);
+				W->ReleaseSlateResources(false); return true;
+			}
+			bFirstAcknowledged=true; return false;
+		}
+		W->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:1:7:3"), FString(), 0);
+		W->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:1:7:3"), FString(), 0);
+		Test->TestEqual(TEXT("Next request completes exactly once"), Sink->TableLoadedCount, 2);
+		Test->TestEqual(TEXT("Restart completes"), W->DataTableLoadState, EEChartsDataTableLoadState::Completed);
+		W->ReleaseSlateResources(false); return true;
+	}
+};
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAppliedReentrancyTest, "EChartsWidget.DataTable.AppliedReentrancyAndSnapshotCopies",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsAppliedReentrancyTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(FEChartsAppliedReentrancyCommand(this, false));
+	ADD_LATENT_AUTOMATION_COMMAND(FEChartsAppliedReentrancyCommand(this, true));
+	ADD_LATENT_AUTOMATION_COMMAND(FEChartsAppliedReentrancyCommand(this, false, true));
+	ADD_LATENT_AUTOMATION_COMMAND(FEChartsAppliedReentrancyCommand(this, true, true));
 	return true;
 }
 #endif

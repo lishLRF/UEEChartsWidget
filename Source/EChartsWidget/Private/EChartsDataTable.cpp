@@ -58,14 +58,19 @@ void UEChartsWidget::LoadDataTable(int32 RowsPerFrame)
 	TotalRows = S.RowNames.Num();
 	DataTableLoadState = EEChartsDataTableLoadState::Reading;
 	const uint64 Request = DataTableRequest;
+	// A positive delay keeps a progress callback's replacement ticker out of the current ticker pass.
 	DataTableTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
-	    FTickerDelegate::CreateWeakLambda(this, [this, Request](float) { return ReadDataTableBatch(Request); }));
+	    FTickerDelegate::CreateWeakLambda(this, [this, Request](float) { return ReadDataTableBatch(Request); }), 0.0001f);
 }
 bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 {
 	check(IsInGameThread());
 	if (Request != DataTableRequest || DataTableLoadState != EEChartsDataTableLoadState::Reading || !DataTableSnapshot)
 		return false;
+	// FTSTicker pumps new delegates within the same Tick. This guard belongs to the widget, not a request.
+	if (LastDataTableReadFrame == GFrameCounter)
+		return true;
+	LastDataTableReadFrame = GFrameCounter;
 	auto S = DataTableSnapshot;
 	if (CurrentTemplate != S->Template)
 	{
@@ -116,7 +121,14 @@ void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 	check(IsInGameThread());
 	DataTableLoadState = EEChartsDataTableLoadState::Processing;
 	auto S = MoveTemp(DataTableSnapshot);
-	auto Series = SeriesData;
+	TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> Series;
+	Series[0].Name = SeriesData[0].Name;
+	for (int32 Index = 1; Index < FEChartsPayloadBuilder::MaxSeriesCount; ++Index)
+		Series[Index] = SeriesData[Index];
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+	DataTableWorkerSnapshotPointCountForTesting = 0;
+	for (const FEChartsSeriesData& Copied : Series) DataTableWorkerSnapshotPointCountForTesting += Copied.Num();
+#endif
 	const int64 BaseRevision = DataRevision;
 	const auto Template = CurrentTemplate;
 	auto Next = [](int64 R) { return R >= 9007199254740991LL ? int64(1) : R + 1; };

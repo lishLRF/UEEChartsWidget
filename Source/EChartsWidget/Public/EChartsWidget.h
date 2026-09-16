@@ -199,6 +199,7 @@ public:
 	void SetForceWebGLUnavailableForTesting(bool bForceUnavailable);
 	void SetInitializationPayloadForTesting(const FString& PayloadJson, bool bReportSeriesCount);
 	bool IsAutoApplyScheduledForTesting() const;
+	int32 GetDataTableWorkerSnapshotPointCountForTesting() const { return DataTableWorkerSnapshotPointCountForTesting; }
 #endif
 
 protected:
@@ -229,6 +230,7 @@ private:
 	TSharedPtr<struct FEChartsDataTableSnapshot> DataTableSnapshot;
 	FTSTicker::FDelegateHandle DataTableTickerHandle;
 	uint64 DataTableRequest = 0;
+	uint64 LastDataTableReadFrame = MAX_uint64;
 	int64 DataTableApplyRevision = 0;
 	FString DataTablePayloadBase64;
 	FEChartsSeriesData DataTablePreviousSeries;
@@ -251,6 +253,7 @@ private:
 	FTSTicker::FDelegateHandle AutoApplyTickerHandle;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
+	int32 DataTableWorkerSnapshotPointCountForTesting = 0;
 	bool bReportSeriesCountForTesting = false;
 	FString InitializationPayloadForTesting = TEXT("{}");
 #endif
