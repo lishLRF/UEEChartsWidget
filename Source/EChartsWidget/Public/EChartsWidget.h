@@ -4,6 +4,8 @@
 #include "Containers/StaticArray.h"
 #include "Containers/Ticker.h"
 #include "EChartsDataTypes.h"
+#include "EChartsDataTableTypes.h"
+#include "Engine/DataTable.h"
 #include "EChartsPayloadBuilder.h"
 #include "WebBrowser.h"
 #include "EChartsWidget.generated.h"
@@ -38,6 +40,27 @@ public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEChartsApplied, int64, Revision, int32, PointCount);
 
 	UEChartsWidget(const FObjectInitializer& ObjectInitializer);
+
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDataTableLoadProgress, int32, Processed, int32, Total);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDataTableLoaded, int32, Succeeded, int32, Skipped);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDataTableLoadCancelled);
+	UFUNCTION(BlueprintCallable, Category="ECharts|DataTable", meta=(DisplayName="Get ECharts DataTable Columns"))
+	bool GetEChartsDataTableColumns(UDataTable* Table, TArray<FEChartsDataTableColumn>& OutColumns, FString& OutError) const;
+	UFUNCTION(BlueprintCallable, Category="ECharts|DataTable", meta=(DisplayName="Set DataTable Mapping"))
+	bool SetDataTableMapping(UDataTable* Table, const FEChartsDataTableMapping& Mapping);
+	UFUNCTION(BlueprintCallable, Category="ECharts|DataTable", meta=(DisplayName="Load Data Table"))
+	void LoadDataTable(int32 RowsPerFrame = 256);
+	UFUNCTION(BlueprintCallable, Category="ECharts|DataTable", meta=(DisplayName="Cancel Data Table Load"))
+	void CancelDataTableLoad();
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|DataTable") EEChartsDataTableLoadState DataTableLoadState = EEChartsDataTableLoadState::Idle;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|DataTable") int32 RowsProcessed = 0;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|DataTable") int32 RowsSucceeded = 0;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|DataTable") int32 RowsSkipped = 0;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|DataTable") int32 TotalRows = 0;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|DataTable") FString LastDataTableError;
+	UPROPERTY(BlueprintAssignable, Category="ECharts|Event") FOnDataTableLoadProgress OnDataTableLoadProgress;
+	UPROPERTY(BlueprintAssignable, Category="ECharts|Event") FOnDataTableLoaded OnDataTableLoaded;
+	UPROPERTY(BlueprintAssignable, Category="ECharts|Event") FOnDataTableLoadCancelled OnDataTableLoadCancelled;
 
 	/**
 	 * Starts an asynchronous local-page load for a new generation.
@@ -197,6 +220,20 @@ private:
 	void ScheduleAutoApply();
 	void CancelAutoApply();
 	int32 GetTotalPointCount() const;
+	void StopDataTableLoad(bool bNotify);
+	void FailDataTableLoad(const FString& Error);
+	bool ReadDataTableBatch(uint64 Request);
+	void ProcessDataTableSnapshot(uint64 Request);
+	UPROPERTY(Transient) TObjectPtr<UDataTable> MappedDataTable;
+	FEChartsDataTableMapping DataTableMapping;
+	TSharedPtr<struct FEChartsDataTableSnapshot> DataTableSnapshot;
+	FTSTicker::FDelegateHandle DataTableTickerHandle;
+	uint64 DataTableRequest = 0;
+	int64 DataTableApplyRevision = 0;
+	FString DataTablePayloadBase64;
+	FEChartsSeriesData DataTablePreviousSeries;
+	EEChartsXAxisMode DataTablePreviousAxis = EEChartsXAxisMode::ShowAll;
+	bool bInstallingDataTable = false;
 
 	uint64 LoadGeneration = 0;
 	bool bReadyBroadcast = false;

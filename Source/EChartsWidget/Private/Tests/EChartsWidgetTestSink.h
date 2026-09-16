@@ -12,6 +12,30 @@ class UEChartsWidgetTestSink : public UObject
 
 public:
 	UFUNCTION()
+	void HandleTableProgress(int32 Processed, int32 Total)
+	{
+		++TableProgressCount;
+		MaxTableBatch = FMath::Max(MaxTableBatch, Processed - LastTableProcessed);
+		LastTableProcessed = Processed;
+		bTableEventsOnGameThread &= IsInGameThread();
+		if (TableTemplateChangeWidget.IsValid()) TableTemplateChangeWidget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap);
+	}
+	UFUNCTION()
+	void HandleTableLoaded(int32 Succeeded, int32 Skipped)
+	{
+		++TableLoadedCount;
+		bTableEventsOnGameThread &= IsInGameThread();
+	}
+	UFUNCTION()
+	void HandleTableCancelled() { ++TableCancelledCount; bTableEventsOnGameThread &= IsInGameThread(); }
+	int32 TableProgressCount = 0;
+	int32 MaxTableBatch = 0;
+	int32 LastTableProcessed = 0;
+	int32 TableLoadedCount = 0;
+	int32 TableCancelledCount = 0;
+	bool bTableEventsOnGameThread = true;
+	TWeakObjectPtr<UEChartsWidget> TableTemplateChangeWidget;
+	UFUNCTION()
 	void HandleReady()
 	{
 		++ReadyCount;

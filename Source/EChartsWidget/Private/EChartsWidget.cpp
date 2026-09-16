@@ -108,6 +108,11 @@ void UEChartsWidget::ReportDataError(const FString& Message)
 
 void UEChartsWidget::MarkDataChanged()
 {
+	if (!bInstallingDataTable && DataTableLoadState == EEChartsDataTableLoadState::Applying)
+	{
+		DataTableApplyRevision = 0;
+		StopDataTableLoad(false);
+	}
 	static constexpr int64 MaxJavascriptSafeInteger = 9007199254740991LL;
 	if (DataRevision >= MaxJavascriptSafeInteger)
 	{
@@ -391,7 +396,12 @@ void UEChartsWidget::SubmitLatestData()
 	FString PayloadBase64;
 	FString Error;
 	int32 PointCount = 0;
-	if (!FEChartsPayloadBuilder::BuildBase64Payload(
+	if (DataTableApplyRevision == DataRevision && !DataTablePayloadBase64.IsEmpty())
+	{
+		PayloadBase64 = DataTablePayloadBase64;
+		PointCount = GetTotalPointCount();
+	}
+	else if (!FEChartsPayloadBuilder::BuildBase64Payload(
 		CurrentTemplate, XAxisMode, SeriesData, DataRevision, PayloadBase64, PointCount, Error))
 	{
 		bApplyRequested = false;
@@ -491,6 +501,7 @@ void UEChartsWidget::BeginLoadGeneration()
 
 void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 {
+	StopDataTableLoad(false);
 	CancelAutoApply();
 	if (InFlightRevision != 0)
 	{
@@ -510,6 +521,7 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 
 void UEChartsWidget::BeginDestroy()
 {
+	StopDataTableLoad(false);
 	CancelAutoApply();
 	Super::BeginDestroy();
 }
@@ -586,6 +598,14 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				bIsDirty = false;
 			}
 			OnEChartsApplied.Broadcast(MessageRevision, MessagePointCount);
+			if (DataTableLoadState == EEChartsDataTableLoadState::Applying && MessageRevision == DataTableApplyRevision)
+			{
+				DataTableLoadState = EEChartsDataTableLoadState::Completed;
+				DataTableApplyRevision = 0;
+				DataTablePayloadBase64.Reset();
+				DataTablePreviousSeries = {};
+				OnDataTableLoaded.Broadcast(RowsSucceeded, RowsSkipped);
+			}
 			if (bApplyRequested && bIsDirty)
 			{
 				SubmitLatestData();
@@ -643,6 +663,12 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		{
 			LastError = Error;
 			RuntimeState = EEChartsRuntimeState::Error;
+			if (DataTableLoadState == EEChartsDataTableLoadState::Reading || DataTableLoadState == EEChartsDataTableLoadState::Processing || DataTableLoadState == EEChartsDataTableLoadState::Applying)
+			{
+				StopDataTableLoad(false);
+				DataTableLoadState = EEChartsDataTableLoadState::Error;
+				LastDataTableError = Error;
+			}
 			OnEChartsError.Broadcast(LastError);
 		}
 	}

@@ -6,12 +6,13 @@
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include <atomic>
 
 namespace
 {
 #if WITH_DEV_AUTOMATION_TESTS
-	int32 GSerializationAttemptCount = 0;
-	int32 GDecodeAttemptCount = 0;
+	std::atomic<int32> GSerializationAttemptCount{0};
+	std::atomic<int32> GDecodeAttemptCount{0};
 #endif
 
 	FString TemplateName(const EEChartsTemplate Template)
