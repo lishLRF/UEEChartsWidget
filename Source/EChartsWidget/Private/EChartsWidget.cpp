@@ -1,5 +1,7 @@
 #include "EChartsWidget.h"
 
+#include "Containers/Ticker.h"
+#include "HAL/PlatformTime.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 
@@ -9,6 +11,7 @@ namespace
 {
 	const FString ReadyMarker = TEXT("__UE_ECHARTS_READY__:");
 	const FString RenderedMarker = TEXT("__UE_ECHARTS_RENDERED__:");
+	const FString AppliedMarker = TEXT("__UE_ECHARTS_APPLIED__:");
 	const FString WarningMarker = TEXT("__UE_ECHARTS_WARNING__:");
 	const FString ErrorMarker = TEXT("__UE_ECHARTS_ERROR__:");
 
@@ -64,7 +67,372 @@ UEChartsWidget::UEChartsWidget(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	bSupportsTransparency = true;
+	for (int32 SeriesIndex = 0; SeriesIndex < FEChartsPayloadBuilder::MaxSeriesCount; ++SeriesIndex)
+	{
+		SeriesData[SeriesIndex].Name = FString::Printf(TEXT("Series %d"), SeriesIndex + 1);
+	}
 	BindConsoleMessage();
+}
+
+bool UEChartsWidget::IsValidSeriesIndex(const int32 SeriesIndex) const
+{
+	return SeriesIndex >= 0 && SeriesIndex < FEChartsPayloadBuilder::MaxSeriesCount;
+}
+
+bool UEChartsWidget::IsGameThreadMutation() const
+{
+	return IsInGameThread();
+}
+
+int32 UEChartsWidget::GetTotalPointCount() const
+{
+	int32 Total = 0;
+	for (const FEChartsSeriesData& Series : SeriesData)
+	{
+		Total += Series.Num();
+	}
+	return Total;
+}
+
+bool UEChartsWidget::CanReplacePointCount(const int32 SeriesIndex, const int32 NewSeriesPointCount) const
+{
+	return IsValidSeriesIndex(SeriesIndex) && NewSeriesPointCount >= 0 &&
+		GetTotalPointCount() - SeriesData[SeriesIndex].Num() + NewSeriesPointCount <= FEChartsPayloadBuilder::MaxPointCount;
+}
+
+void UEChartsWidget::ReportDataError(const FString& Message)
+{
+	LastError = Message;
+	OnEChartsError.Broadcast(Message);
+}
+
+void UEChartsWidget::MarkDataChanged()
+{
+	static constexpr int64 MaxJavascriptSafeInteger = 9007199254740991LL;
+	if (DataRevision >= MaxJavascriptSafeInteger)
+	{
+		DataRevision = 1;
+		LastAppliedRevision = 0;
+	}
+	else
+	{
+		++DataRevision;
+	}
+	bIsDirty = true;
+	ScheduleAutoApply();
+}
+
+bool UEChartsWidget::AddDataPoint(const int32 SeriesIndex, const double X, const double Y)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex) || !FMath::IsFinite(X) || !FMath::IsFinite(Y))
+	{
+		return false;
+	}
+	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	if (Series.Type != EEChartsSeriesDataType::Unset && Series.Type != EEChartsSeriesDataType::Numeric2D)
+	{
+		return false;
+	}
+	if (!CanReplacePointCount(SeriesIndex, Series.Num() + 1))
+	{
+		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
+	Series.Type = EEChartsSeriesDataType::Numeric2D;
+	Series.Numeric2D.Add({X, Y});
+	MarkDataChanged();
+	return true;
+}
+
+bool UEChartsWidget::AddCategoryDataPoint(const int32 SeriesIndex, const FString& X, const double Y)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex) || X.TrimStartAndEnd().IsEmpty() || !FMath::IsFinite(Y))
+	{
+		return false;
+	}
+	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	if (Series.Type != EEChartsSeriesDataType::Unset && Series.Type != EEChartsSeriesDataType::Category)
+	{
+		return false;
+	}
+	if (!CanReplacePointCount(SeriesIndex, Series.Num() + 1))
+	{
+		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
+	Series.Type = EEChartsSeriesDataType::Category;
+	Series.Category.Add({X, Y});
+	MarkDataChanged();
+	return true;
+}
+
+bool UEChartsWidget::SetSeriesData(const int32 SeriesIndex, const TArray<FEChartsDataPoint2D>& Data)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex)) return false;
+	for (const FEChartsDataPoint2D& Point : Data)
+	{
+		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y)) return false;
+	}
+	if (!CanReplacePointCount(SeriesIndex, Data.Num()))
+	{
+		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
+	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	Series.ResetData();
+	Series.Type = EEChartsSeriesDataType::Numeric2D;
+	Series.Numeric2D = Data;
+	MarkDataChanged();
+	return true;
+}
+
+bool UEChartsWidget::AppendSeriesData(const int32 SeriesIndex, const TArray<FEChartsDataPoint2D>& Data)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex) ||
+		(SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Unset && SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Numeric2D)) return false;
+	for (const FEChartsDataPoint2D& Point : Data)
+	{
+		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y)) return false;
+	}
+	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num()))
+	{
+		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
+	if (!Data.IsEmpty())
+	{
+		SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Numeric2D;
+		SeriesData[SeriesIndex].Numeric2D.Append(Data);
+		MarkDataChanged();
+	}
+	return true;
+}
+
+TArray<FEChartsDataPoint2D> UEChartsWidget::GetSeriesData(const int32 SeriesIndex) const
+{
+	return IsValidSeriesIndex(SeriesIndex) && SeriesData[SeriesIndex].Type == EEChartsSeriesDataType::Numeric2D
+		? SeriesData[SeriesIndex].Numeric2D : TArray<FEChartsDataPoint2D>();
+}
+
+bool UEChartsWidget::SetCategorySeriesData(const int32 SeriesIndex, const TArray<FEChartsCategoryDataPoint>& Data)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex)) return false;
+	for (const FEChartsCategoryDataPoint& Point : Data)
+	{
+		if (Point.X.TrimStartAndEnd().IsEmpty() || !FMath::IsFinite(Point.Y)) return false;
+	}
+	if (!CanReplacePointCount(SeriesIndex, Data.Num()))
+	{
+		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
+	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	Series.ResetData();
+	Series.Type = EEChartsSeriesDataType::Category;
+	Series.Category = Data;
+	MarkDataChanged();
+	return true;
+}
+
+bool UEChartsWidget::AppendCategorySeriesData(const int32 SeriesIndex, const TArray<FEChartsCategoryDataPoint>& Data)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex) ||
+		(SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Unset && SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Category)) return false;
+	for (const FEChartsCategoryDataPoint& Point : Data)
+	{
+		if (Point.X.TrimStartAndEnd().IsEmpty() || !FMath::IsFinite(Point.Y)) return false;
+	}
+	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num()))
+	{
+		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
+	if (!Data.IsEmpty())
+	{
+		SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Category;
+		SeriesData[SeriesIndex].Category.Append(Data);
+		MarkDataChanged();
+	}
+	return true;
+}
+
+TArray<FEChartsCategoryDataPoint> UEChartsWidget::GetCategorySeriesData(const int32 SeriesIndex) const
+{
+	return IsValidSeriesIndex(SeriesIndex) && SeriesData[SeriesIndex].Type == EEChartsSeriesDataType::Category
+		? SeriesData[SeriesIndex].Category : TArray<FEChartsCategoryDataPoint>();
+}
+
+bool UEChartsWidget::Set3DData(const int32 SeriesIndex, const TArray<FEChartsDataPoint3D>& Data)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex)) return false;
+	for (const FEChartsDataPoint3D& Point : Data)
+	{
+		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y) || !FMath::IsFinite(Point.Z) ||
+			!FMath::IsFinite(Point.ColorValue) || !FMath::IsFinite(Point.SymbolSizeValue)) return false;
+	}
+	if (!CanReplacePointCount(SeriesIndex, Data.Num()))
+	{
+		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
+	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	Series.ResetData();
+	Series.Type = EEChartsSeriesDataType::Data3D;
+	Series.Data3D = Data;
+	MarkDataChanged();
+	return true;
+}
+
+bool UEChartsWidget::Append3DData(const int32 SeriesIndex, const TArray<FEChartsDataPoint3D>& Data)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex) ||
+		(SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Unset && SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Data3D)) return false;
+	for (const FEChartsDataPoint3D& Point : Data)
+	{
+		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y) || !FMath::IsFinite(Point.Z) ||
+			!FMath::IsFinite(Point.ColorValue) || !FMath::IsFinite(Point.SymbolSizeValue)) return false;
+	}
+	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num()))
+	{
+		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
+	if (!Data.IsEmpty())
+	{
+		SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Data3D;
+		SeriesData[SeriesIndex].Data3D.Append(Data);
+		MarkDataChanged();
+	}
+	return true;
+}
+
+TArray<FEChartsDataPoint3D> UEChartsWidget::Get3DData(const int32 SeriesIndex) const
+{
+	return IsValidSeriesIndex(SeriesIndex) && SeriesData[SeriesIndex].Type == EEChartsSeriesDataType::Data3D
+		? SeriesData[SeriesIndex].Data3D : TArray<FEChartsDataPoint3D>();
+}
+
+bool UEChartsWidget::ClearSeries(const int32 SeriesIndex)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex)) return false;
+	SeriesData[SeriesIndex].ResetData();
+	SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Unset;
+	MarkDataChanged();
+	return true;
+}
+
+void UEChartsWidget::ClearAll()
+{
+	if (!IsGameThreadMutation()) return;
+	for (FEChartsSeriesData& Series : SeriesData)
+	{
+		Series.ResetData();
+		Series.Type = EEChartsSeriesDataType::Unset;
+	}
+	MarkDataChanged();
+}
+
+bool UEChartsWidget::SetSeriesName(const int32 SeriesIndex, const FString& Name)
+{
+	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex)) return false;
+	SeriesData[SeriesIndex].Name = Name;
+	MarkDataChanged();
+	return true;
+}
+
+void UEChartsWidget::SetXAxisMode(const EEChartsXAxisMode Mode)
+{
+	if (!IsGameThreadMutation()) return;
+	XAxisMode = Mode;
+	MarkDataChanged();
+}
+
+void UEChartsWidget::ApplyEChartsChanges()
+{
+	if (!IsGameThreadMutation()) return;
+	CancelAutoApply();
+	if (!bIsDirty)
+	{
+		bApplyRequested = false;
+		return;
+	}
+	bApplyRequested = true;
+	if (RuntimeState == EEChartsRuntimeState::Ready && InFlightRevision == 0)
+	{
+		SubmitLatestData();
+	}
+}
+
+void UEChartsWidget::SetAutoApplyEnabled(const bool bEnabled, const float InMaxUpdatesPerSecond)
+{
+	if (!IsGameThreadMutation()) return;
+	CancelAutoApply();
+	bAutoApplyEnabled = bEnabled;
+	MaxUpdatesPerSecond = FMath::Clamp(FMath::IsFinite(InMaxUpdatesPerSecond) ? InMaxUpdatesPerSecond : 10.0f, 1.0f, 30.0f);
+	if (bAutoApplyEnabled)
+	{
+		ScheduleAutoApply();
+	}
+	else
+	{
+		CancelAutoApply();
+	}
+}
+
+void UEChartsWidget::SubmitLatestData()
+{
+	if (!bIsDirty)
+	{
+		bApplyRequested = false;
+		return;
+	}
+	if (RuntimeState != EEChartsRuntimeState::Ready || InFlightRevision != 0) return;
+	FString PayloadBase64;
+	FString Error;
+	int32 PointCount = 0;
+	if (!FEChartsPayloadBuilder::BuildBase64Payload(
+		CurrentTemplate, XAxisMode, SeriesData, DataRevision, PayloadBase64, PointCount, Error))
+	{
+		bApplyRequested = false;
+		ReportDataError(Error);
+		return;
+	}
+
+	InFlightRevision = DataRevision;
+	bApplyRequested = false;
+	LastSubmitSeconds = FPlatformTime::Seconds();
+	ExecuteJavascript(FEChartsWidgetJavascript::BuildApplyDataCommand(PayloadBase64));
+}
+
+void UEChartsWidget::ScheduleAutoApply()
+{
+	if (!bAutoApplyEnabled || !bIsDirty || RuntimeState != EEChartsRuntimeState::Ready ||
+		InFlightRevision != 0 || AutoApplyTickerHandle.IsValid())
+	{
+		return;
+	}
+	const double Interval = 1.0 / static_cast<double>(MaxUpdatesPerSecond);
+	const float Delay = static_cast<float>(FMath::Max(0.0, Interval - (FPlatformTime::Seconds() - LastSubmitSeconds)));
+	AutoApplyTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateWeakLambda(this, [this](float)
+		{
+			AutoApplyTickerHandle.Reset();
+			if (bAutoApplyEnabled && bIsDirty && RuntimeState == EEChartsRuntimeState::Ready && InFlightRevision == 0)
+			{
+				SubmitLatestData();
+			}
+			return false;
+		}),
+		Delay);
+}
+
+void UEChartsWidget::CancelAutoApply()
+{
+	if (AutoApplyTickerHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(AutoApplyTickerHandle);
+		AutoApplyTickerHandle.Reset();
+	}
 }
 
 void UEChartsWidget::InitializeECharts(
@@ -82,6 +450,12 @@ void UEChartsWidget::InitializeECharts(
 
 void UEChartsWidget::BeginLoadGeneration()
 {
+	CancelAutoApply();
+	if (InFlightRevision != 0)
+	{
+		bApplyRequested = true;
+		InFlightRevision = 0;
+	}
 	RuntimeState = EEChartsRuntimeState::Loading;
 	LastError.Reset();
 	LastWarning.Reset();
@@ -111,6 +485,12 @@ void UEChartsWidget::BeginLoadGeneration()
 
 void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 {
+	CancelAutoApply();
+	if (InFlightRevision != 0)
+	{
+		bApplyRequested = true;
+		InFlightRevision = 0;
+	}
 	bReloadOnRebuild = bHasInitialized;
 	OnConsoleMessage.RemoveDynamic(this, &UEChartsWidget::HandleEChartsConsoleMessage);
 	bReadyBroadcast = false;
@@ -120,6 +500,12 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 	LastWarning.Reset();
 	EffectiveTemplate.Reset();
 	Super::ReleaseSlateResources(bReleaseChildren);
+}
+
+void UEChartsWidget::BeginDestroy()
+{
+	CancelAutoApply();
+	Super::BeginDestroy();
 }
 
 TSharedRef<SWidget> UEChartsWidget::RebuildWidget()
@@ -162,6 +548,46 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				InteractionMode,
 				PayloadJson));
 			OnChartReady.Broadcast();
+			if (bApplyRequested)
+			{
+				SubmitLatestData();
+			}
+			else
+			{
+				ScheduleAutoApply();
+			}
+		}
+		return;
+	}
+
+	if (Message.StartsWith(AppliedMarker))
+	{
+		TArray<FString> Parts;
+		Message.RightChop(AppliedMarker.Len()).ParseIntoArray(Parts, TEXT(":"), false);
+		uint64 MessageGeneration = 0;
+		int64 MessageRevision = 0;
+		int32 MessagePointCount = 0;
+		if (Parts.Num() == 3 && TryParseGeneration(Parts[0], MessageGeneration) &&
+			LexTryParseString(MessageRevision, *Parts[1]) && LexTryParseString(MessagePointCount, *Parts[2]) &&
+			MessageGeneration == LoadGeneration && MessageRevision > 0 && MessagePointCount >= 0 &&
+			MessageRevision == InFlightRevision)
+		{
+			InFlightRevision = 0;
+			LastAppliedRevision = MessageRevision;
+			LastAppliedPointCount = MessagePointCount;
+			if (MessageRevision == DataRevision)
+			{
+				bIsDirty = false;
+			}
+			OnEChartsApplied.Broadcast(MessageRevision, MessagePointCount);
+			if (bApplyRequested && bIsDirty)
+			{
+				SubmitLatestData();
+			}
+			else
+			{
+				ScheduleAutoApply();
+			}
 		}
 		return;
 	}
@@ -260,6 +686,29 @@ FString FEChartsWidgetJavascript::BuildRenderCommand(
 		*InteractionModeName(InteractionMode));
 }
 
+FString FEChartsWidgetJavascript::BuildApplyDataCommand(const FString& PayloadBase64)
+{
+	if (PayloadBase64.IsEmpty())
+	{
+		return FString();
+	}
+	for (const TCHAR Character : PayloadBase64)
+	{
+		const bool bBase64Character =
+			(Character >= TEXT('A') && Character <= TEXT('Z')) ||
+			(Character >= TEXT('a') && Character <= TEXT('z')) ||
+			(Character >= TEXT('0') && Character <= TEXT('9')) ||
+			Character == TEXT('+') || Character == TEXT('/') || Character == TEXT('=');
+		if (!bBase64Character)
+		{
+			return FString();
+		}
+	}
+	return FString::Printf(
+		TEXT("window.UEEChartsHost.applyDataBase64(\"%s\");"),
+		*PayloadBase64);
+}
+
 void UEChartsWidget::BindConsoleMessage()
 {
 	OnConsoleMessage.AddUniqueDynamic(this, &UEChartsWidget::HandleEChartsConsoleMessage);
@@ -295,6 +744,11 @@ void UEChartsWidget::SetInitializationPayloadForTesting(
 {
 	InitializationPayloadForTesting = PayloadJson.IsEmpty() ? TEXT("{}") : PayloadJson;
 	bReportSeriesCountForTesting = bReportSeriesCount;
+}
+
+bool UEChartsWidget::IsAutoApplyScheduledForTesting() const
+{
+	return AutoApplyTickerHandle.IsValid();
 }
 #endif
 

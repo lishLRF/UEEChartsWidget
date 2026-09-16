@@ -17,7 +17,8 @@ public class EChartsWidget : ModuleRules
 			"SlateCore",
 			"WebBrowserWidget",
 			"WebBrowser",
-			"Projects"
+			"Projects",
+			"Json"
 		});
 
 		if (Target.bBuildEditor)

@@ -26,6 +26,115 @@
     let chart = window.echarts.init(chartElement, null, { renderer: 'canvas' });
     let resizeObserver = null;
     const webglAvailable = resolveWebGL();
+    let currentEffectiveTemplate = null;
+    let currentOption = null;
+    let currentInteractionMode = 'ClickOnly';
+
+    function clone(value) {
+      if (Array.isArray(value)) return value.map(clone);
+      if (value && typeof value === 'object') {
+        const result = {};
+        Object.keys(value).forEach(function (key) { result[key] = clone(value[key]); });
+        return result;
+      }
+      return value;
+    }
+
+    function decodePayload(base64) {
+      if (typeof base64 !== 'string' || base64.length === 0 || base64.length % 4 !== 0 ||
+          base64.length > Math.ceil(16 * 1024 * 1024 / 3) * 4 + 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+        throw new Error('Invalid Base64 data payload');
+      }
+      const binary = atob(base64);
+      if (binary.length > 16 * 1024 * 1024) throw new Error('Decoded data payload exceeds 16777216 bytes');
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    }
+
+    function validatePayload(payload) {
+      if (!payload || typeof payload !== 'object' || !Number.isSafeInteger(payload.revision) || payload.revision <= 0) {
+        throw new Error('Data payload revision must be a positive integer');
+      }
+      if (typeof payload.template !== 'string' ||
+          !['FollowLatestWindow', 'ShowAll', 'Category'].includes(payload.xAxisMode)) {
+        throw new Error('Invalid template or xAxisMode in data payload');
+      }
+      if (!Array.isArray(payload.series) || payload.series.length > 4) throw new Error('Data payload supports at most 4 series');
+      let pointCount = 0;
+      payload.series.forEach(function (series, expectedIndex) {
+        if (!series || series.index !== expectedIndex || typeof series.name !== 'string' ||
+            !['numeric2D', 'category', 'data3D'].includes(series.type) || !Array.isArray(series.data)) {
+          throw new Error('Invalid series payload at index ' + expectedIndex);
+        }
+        const width = series.type === 'numeric2D' ? 2 : (series.type === 'category' ? 2 : 5);
+        series.data.forEach(function (point) {
+          if (!Array.isArray(point) || point.length !== width) throw new Error('Invalid point width in series ' + expectedIndex);
+          if (series.type === 'category') {
+            if (typeof point[0] !== 'string' || point[0].trim().length === 0 || !Number.isFinite(point[1])) {
+              throw new Error('Invalid category point in series ' + expectedIndex);
+            }
+          } else if (!point.every(Number.isFinite)) {
+            throw new Error('Non-finite numeric point in series ' + expectedIndex);
+          }
+        });
+        pointCount += series.data.length;
+      });
+      if (pointCount > 100000) throw new Error('Data payload exceeds 100000 points');
+      return pointCount;
+    }
+
+    function updateAxis(option, key, values) {
+      const axes = Array.isArray(option[key]) ? option[key] : [option[key] || {}];
+      axes[0] = Object.assign({}, axes[0], values);
+      option[key] = Array.isArray(option[key]) ? axes : axes[0];
+    }
+
+    function optionForPayload(payload) {
+      if (!currentOption || !currentEffectiveTemplate) throw new Error('Template must be rendered before applying data');
+      const option = clone(currentOption);
+      const oldSeries = Array.isArray(option.series) ? option.series : (option.series ? [option.series] : []);
+      let categoryLabels = null;
+      let has2DSeries = false;
+      option.series = payload.series.map(function (input, index) {
+        const prototype = oldSeries[index] || oldSeries[0] || {};
+        const output = Object.assign({}, clone(prototype), { name: input.name });
+        if (input.type === 'category') {
+          has2DSeries = true;
+          categoryLabels = categoryLabels || input.data.map(function (point) { return point[0]; });
+          output.type = 'line';
+          output.data = input.data.map(function (point) { return point[1]; });
+        } else if (input.type === 'data3D') {
+          output.type = 'scatter3D';
+          output.data = clone(input.data);
+          output.encode = { x: 0, y: 1, z: 2, tooltip: [0, 1, 2, 3, 4] };
+          output.symbolSize = function (value) { return value[4]; };
+        } else {
+          has2DSeries = true;
+          output.type = currentEffectiveTemplate.indexOf('Scatter') >= 0 ? 'scatter' : 'line';
+          output.data = clone(input.data);
+          output.encode = { x: 0, y: 1 };
+        }
+        output.silent = currentInteractionMode === 'Disabled';
+        return output;
+      });
+
+      const names = payload.series.map(function (series) { return series.name; });
+      const legends = Array.isArray(option.legend) ? option.legend : [option.legend || {}];
+      legends.forEach(function (legend) { legend.data = names; });
+      option.legend = Array.isArray(option.legend) ? legends : legends[0];
+
+      if (payload.xAxisMode === 'Category' || categoryLabels) {
+        updateAxis(option, 'xAxis', { type: 'category', data: categoryLabels || [] });
+      } else {
+        updateAxis(option, 'xAxis', { type: 'value', data: undefined });
+      }
+      if (has2DSeries) {
+        updateAxis(option, 'yAxis', { type: 'value' });
+        if (!option.grid) option.grid = { left: 58, right: 24, top: 42, bottom: 44 };
+      }
+      return window.UEEChartsTemplates.applyInteractionMode(option, currentInteractionMode);
+    }
     function resizeChart() {
       if (!chart) return;
       chart.resize();
@@ -43,6 +152,9 @@
           }
           chart.clear();
           chart.setOption(option, { notMerge: true, lazyUpdate: false });
+          currentEffectiveTemplate = result.effectiveTemplate;
+          currentOption = option;
+          currentInteractionMode = interactionMode || 'ClickOnly';
           if (parameters.get('testSeriesProbe') === '1') {
             const appliedOption = chart.getOption();
             const seriesCount = Array.isArray(appliedOption.series) ? appliedOption.series.length : 0;
@@ -55,6 +167,24 @@
           emit('ERROR', template + ' render failed: ' + detail);
           return null;
         }
+      },
+      applyDataBase64: function (base64) {
+        try {
+          const payload = decodePayload(base64);
+          const pointCount = validatePayload(payload);
+          const option = optionForPayload(payload);
+          chart.setOption(option, { notMerge: true, lazyUpdate: false });
+          currentOption = option;
+          emit('APPLIED', String(payload.revision) + ':' + String(pointCount));
+          return true;
+        } catch (error) {
+          const detail = error && error.message ? error.message : String(error);
+          emit('ERROR', 'data apply failed: ' + detail.replace(/[\r\n]+/g, ' | '));
+          return false;
+        }
+      },
+      getOptionForTesting: function () {
+        return chart.getOption();
       },
       resize: resizeChart,
       dispose: function () {

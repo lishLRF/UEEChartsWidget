@@ -1,17 +1,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/StaticArray.h"
+#include "Containers/Ticker.h"
+#include "EChartsDataTypes.h"
+#include "EChartsPayloadBuilder.h"
 #include "WebBrowser.h"
 #include "EChartsWidget.generated.h"
-
-UENUM(BlueprintType)
-enum class EEChartsTemplate : uint8
-{
-	SegmentedAreaLine,
-	Bar3DHeightMap,
-	DataTableScatter3D,
-	CustomOption
-};
 
 UENUM(BlueprintType)
 enum class EEChartsInteractionMode : uint8
@@ -40,6 +35,7 @@ public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnChartRendered, EEChartsTemplate, RequestedTemplate, const FString&, EffectiveTemplate);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEChartsWarning, const FString&, Message);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEChartsError, const FString&, Message);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEChartsApplied, int64, Revision, int32, PointCount);
 
 	UEChartsWidget(const FObjectInitializer& ObjectInitializer);
 
@@ -54,6 +50,57 @@ public:
 	void InitializeECharts(
 		EEChartsTemplate Template = EEChartsTemplate::SegmentedAreaLine,
 		EEChartsInteractionMode InInteractionMode = EEChartsInteractionMode::ClickOnly);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Add Data Point"))
+	bool AddDataPoint(int32 SeriesIndex, double X, double Y);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Add Category Data Point"))
+	bool AddCategoryDataPoint(int32 SeriesIndex, const FString& X, double Y);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Set Series Data"))
+	bool SetSeriesData(int32 SeriesIndex, const TArray<FEChartsDataPoint2D>& Data);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Append Series Data"))
+	bool AppendSeriesData(int32 SeriesIndex, const TArray<FEChartsDataPoint2D>& Data);
+
+	UFUNCTION(BlueprintPure, Category = "ECharts|Data", meta = (DisplayName = "Get Series Data"))
+	TArray<FEChartsDataPoint2D> GetSeriesData(int32 SeriesIndex) const;
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Set Category Series Data"))
+	bool SetCategorySeriesData(int32 SeriesIndex, const TArray<FEChartsCategoryDataPoint>& Data);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Append Category Series Data"))
+	bool AppendCategorySeriesData(int32 SeriesIndex, const TArray<FEChartsCategoryDataPoint>& Data);
+
+	UFUNCTION(BlueprintPure, Category = "ECharts|Data", meta = (DisplayName = "Get Category Series Data"))
+	TArray<FEChartsCategoryDataPoint> GetCategorySeriesData(int32 SeriesIndex) const;
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Set 3D Data"))
+	bool Set3DData(int32 SeriesIndex, const TArray<FEChartsDataPoint3D>& Data);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Append 3D Data"))
+	bool Append3DData(int32 SeriesIndex, const TArray<FEChartsDataPoint3D>& Data);
+
+	UFUNCTION(BlueprintPure, Category = "ECharts|Data", meta = (DisplayName = "Get 3D Data"))
+	TArray<FEChartsDataPoint3D> Get3DData(int32 SeriesIndex) const;
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Clear Series"))
+	bool ClearSeries(int32 SeriesIndex);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Clear All"))
+	void ClearAll();
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Set Series Name"))
+	bool SetSeriesName(int32 SeriesIndex, const FString& Name);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Set X Axis Mode"))
+	void SetXAxisMode(EEChartsXAxisMode Mode);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Apply ECharts Changes"))
+	void ApplyEChartsChanges();
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Set Auto Apply Enabled"))
+	void SetAutoApplyEnabled(bool bEnabled, float InMaxUpdatesPerSecond = 10.0f);
 
 	/** Template selected for the current asynchronous load generation. */
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
@@ -79,6 +126,24 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	FString EffectiveTemplate;
 
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data")
+	EEChartsXAxisMode XAxisMode = EEChartsXAxisMode::ShowAll;
+
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data")
+	bool bIsDirty = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data")
+	int64 LastAppliedRevision = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data")
+	int32 LastAppliedPointCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data")
+	bool bAutoApplyEnabled = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data")
+	float MaxUpdatesPerSecond = 10.0f;
+
 	/** Broadcast once when the current generation reports Ready. */
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
 	FOnChartReady OnChartReady;
@@ -95,7 +160,11 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
 	FOnEChartsError OnEChartsError;
 
+	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
+	FOnEChartsApplied OnEChartsApplied;
+
 	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	virtual void BeginDestroy() override;
 
 #if WITH_EDITOR
 	virtual const FText GetPaletteCategory() override;
@@ -106,6 +175,7 @@ public:
 	void PrepareRebuildForTesting();
 	void SetForceWebGLUnavailableForTesting(bool bForceUnavailable);
 	void SetInitializationPayloadForTesting(const FString& PayloadJson, bool bReportSeriesCount);
+	bool IsAutoApplyScheduledForTesting() const;
 #endif
 
 protected:
@@ -118,12 +188,27 @@ private:
 	void BindConsoleMessage();
 	void BeginLoadGeneration();
 	void PrepareAutomaticRebuild();
+	bool IsValidSeriesIndex(int32 SeriesIndex) const;
+	bool IsGameThreadMutation() const;
+	bool CanReplacePointCount(int32 SeriesIndex, int32 NewSeriesPointCount) const;
+	void MarkDataChanged();
+	void ReportDataError(const FString& Message);
+	void SubmitLatestData();
+	void ScheduleAutoApply();
+	void CancelAutoApply();
+	int32 GetTotalPointCount() const;
 
 	uint64 LoadGeneration = 0;
 	bool bReadyBroadcast = false;
 	bool bRenderedBroadcast = false;
 	bool bHasInitialized = false;
 	bool bReloadOnRebuild = false;
+	TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> SeriesData;
+	int64 DataRevision = 0;
+	int64 InFlightRevision = 0;
+	bool bApplyRequested = false;
+	double LastSubmitSeconds = 0.0;
+	FTSTicker::FDelegateHandle AutoApplyTickerHandle;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
 	bool bReportSeriesCountForTesting = false;
@@ -140,6 +225,7 @@ public:
 		EEChartsTemplate Template,
 		EEChartsInteractionMode InteractionMode,
 		const FString& PayloadJson);
+	static FString BuildApplyDataCommand(const FString& PayloadBase64);
 };
 
 class ECHARTSWIDGET_API FEChartsWidgetResourceLocator

@@ -47,16 +47,24 @@ function createHostContext() {
       applyInteractionMode(option) { return option; },
     },
   };
+  const logs = [];
   const context = vm.createContext({
     Array,
+    atob(value) { return Buffer.from(value, 'base64').toString('binary'); },
     ResizeObserver: FakeResizeObserver,
     String,
+    TextDecoder,
+    Uint8Array,
     URLSearchParams,
-    console: { log() {} },
+    console: { log(value) { logs.push(value); } },
     document: { getElementById() { return chartElement; } },
     window,
   });
-  return { chartElement, charts, context, observers, window };
+  return { chartElement, charts, context, logs, observers, window };
+}
+
+function encodePayload(payload) {
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
 }
 
 test('ResizeObserver drives chart resize and dispose releases observer and chart references', () => {
@@ -88,4 +96,56 @@ test('reinitializing the host disposes the prior chart and observer without time
   assert.equal(state.observers[0].disconnected, true);
   assert.equal(state.observers[1].observed, state.chartElement);
   assert.doesNotMatch(hostSource, /setInterval\s*\(|setTimeout\s*\(/);
+});
+
+test('applyDataBase64 maps numeric, category, and 3D series without evaluating data', () => {
+  const state = createHostContext();
+  let appliedOption = null;
+  state.window.UEEChartsTemplates.createTemplate = (template) => ({
+    requestedTemplate: template,
+    effectiveTemplate: template,
+    option: { tooltip: { trigger: 'axis' }, legend: {}, xAxis: {}, yAxis: {}, series: [{ smooth: true }] },
+  });
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) { appliedOption = option; },
+    getOption() { return appliedOption || { series: [] }; },
+  });
+  vm.runInContext(hostSource, state.context);
+  state.window.UEEChartsHost.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+
+  const injection = '\"\\\\\nUnicode 数据 😀 </script>;globalThis.__executed=true';
+  const payload = {
+    revision: 42,
+    template: 'SegmentedAreaLine',
+    xAxisMode: 'Category',
+    series: [
+      { index: 0, name: injection, type: 'numeric2D', data: [[1, 2], [3, 4]] },
+      { index: 1, name: '类别', type: 'category', data: [['A', 5], ['B', 6]] },
+      { index: 2, name: '空间', type: 'data3D', data: [[1, 2, 3, 4, 12]] },
+    ],
+  };
+
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload(payload)), true);
+  assert.equal(appliedOption.xAxis.type, 'category');
+  assert.deepEqual(Array.from(appliedOption.xAxis.data), ['A', 'B']);
+  assert.equal(appliedOption.series[0].type, 'line');
+  assert.equal(JSON.stringify(appliedOption.series[0].data), JSON.stringify([[1, 2], [3, 4]]));
+  assert.equal(appliedOption.series[0].smooth, true);
+  assert.equal(appliedOption.series[0].name, injection);
+  assert.equal(appliedOption.series[1].type, 'line');
+  assert.deepEqual(Array.from(appliedOption.series[1].data), [5, 6]);
+  assert.equal(appliedOption.series[2].type, 'scatter3D');
+  assert.equal(JSON.stringify(appliedOption.series[2].data), JSON.stringify([[1, 2, 3, 4, 12]]));
+  assert.equal(state.context.__executed, undefined);
+  assert.ok(state.logs.includes('__UE_ECHARTS_APPLIED__:7:42:5'));
+});
+
+test('applyDataBase64 rejects malformed Base64 and JSON with an ERROR marker', () => {
+  const state = createHostContext();
+  vm.runInContext(hostSource, state.context);
+
+  assert.equal(state.window.UEEChartsHost.applyDataBase64('%%%not-base64%%%'), false);
+  assert.ok(state.logs.some((line) => line.startsWith('__UE_ECHARTS_ERROR__:7:')));
+  assert.doesNotMatch(hostSource, /\beval\s*\(|new\s+Function\s*\(/);
 });

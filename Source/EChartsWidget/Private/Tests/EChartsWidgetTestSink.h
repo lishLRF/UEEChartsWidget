@@ -28,6 +28,14 @@ public:
 	UFUNCTION()
 	void HandleConsoleMessage(const FString& Message, const FString& Source, int32 Line)
 	{
+		const FString DataOptionMarker = TEXT("__UE_ECHARTS_TEST_DATA_OPTION__:1:");
+		if (Message.StartsWith(DataOptionMarker))
+		{
+			++DataOptionReportCount;
+			bLastDataOptionSucceeded = Message.RightChop(DataOptionMarker.Len()) == TEXT("OK");
+			return;
+		}
+
 		const FString SeriesMarker = TEXT("__UE_ECHARTS_TEST_SERIES_COUNT__:");
 		if (Message.StartsWith(SeriesMarker))
 		{
@@ -69,10 +77,23 @@ public:
 		LastError = Message;
 	}
 
+	UFUNCTION()
+	void HandleApplied(int64 Revision, int32 PointCount)
+	{
+		++AppliedCount;
+		LastAppliedRevision = Revision;
+		LastAppliedPointCount = PointCount;
+	}
+
 	int32 ReadyCount = 0;
 	int32 RenderedCount = 0;
 	int32 WarningCount = 0;
 	int32 ErrorCount = 0;
+	int32 AppliedCount = 0;
+	int64 LastAppliedRevision = 0;
+	int32 LastAppliedPointCount = 0;
+	int32 DataOptionReportCount = 0;
+	bool bLastDataOptionSucceeded = false;
 	int32 SeriesCountReportCount = 0;
 	int32 LastSeriesCount = INDEX_NONE;
 	int32 ResizeReportCount = 0;
