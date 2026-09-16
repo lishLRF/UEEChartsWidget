@@ -1,5 +1,6 @@
 #include "EChartsPayloadBuilder.h"
 
+#include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
 #include "Misc/Base64.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
@@ -8,6 +9,11 @@
 
 namespace
 {
+#if WITH_DEV_AUTOMATION_TESTS
+	int32 GSerializationAttemptCount = 0;
+	int32 GDecodeAttemptCount = 0;
+#endif
+
 	FString TemplateName(const EEChartsTemplate Template)
 	{
 		switch (Template)
@@ -43,9 +49,72 @@ namespace
 		}
 	}
 
-	int64 Utf8Bytes(const FString& Value)
+	bool TryAddBytes(const int64 Bytes, const int64 Limit, int64& InOutBytes)
 	{
-		return FTCHARToUTF8(*Value).Length();
+		if (Bytes < 0 || InOutBytes < 0 || Limit < 0 || InOutBytes > Limit || Bytes > Limit - InOutBytes)
+		{
+			return false;
+		}
+		InOutBytes += Bytes;
+		return true;
+	}
+
+	bool TryAccumulateJsonStringBytes(const FStringView Value, const int64 Limit, int64& InOutBytes)
+	{
+		for (int32 Index = 0; Index < Value.Len(); ++Index)
+		{
+			uint32 Codepoint = static_cast<uint32>(Value[Index]);
+#if !PLATFORM_TCHAR_IS_4_BYTES
+			if (StringConv::IsHighSurrogate(Codepoint))
+			{
+				if (Index + 1 < Value.Len() && StringConv::IsLowSurrogate(static_cast<uint32>(Value[Index + 1])))
+				{
+					Codepoint = StringConv::EncodeSurrogate(
+						static_cast<uint16>(Codepoint),
+						static_cast<uint16>(Value[++Index]));
+				}
+				else
+				{
+					Codepoint = UNICODE_BOGUS_CHAR_CODEPOINT;
+				}
+			}
+			else if (StringConv::IsLowSurrogate(Codepoint))
+			{
+				Codepoint = UNICODE_BOGUS_CHAR_CODEPOINT;
+			}
+#else
+			if (!StringConv::IsValidCodepoint(Codepoint) || StringConv::IsHighSurrogate(Codepoint) || StringConv::IsLowSurrogate(Codepoint))
+			{
+				Codepoint = UNICODE_BOGUS_CHAR_CODEPOINT;
+			}
+#endif
+
+			int64 EncodedBytes = 0;
+			switch (Codepoint)
+			{
+			case TEXT('"'):
+			case TEXT('\\'):
+			case TEXT('\b'):
+			case TEXT('\f'):
+			case TEXT('\n'):
+			case TEXT('\r'):
+			case TEXT('\t'):
+				EncodedBytes = 2;
+				break;
+			default:
+				if (Codepoint < 0x20) EncodedBytes = 6;
+				else if (Codepoint < 0x80) EncodedBytes = 1;
+				else if (Codepoint < 0x800) EncodedBytes = 2;
+				else if (Codepoint < 0x10000) EncodedBytes = 3;
+				else EncodedBytes = 4;
+				break;
+			}
+			if (!TryAddBytes(EncodedBytes, Limit, InOutBytes))
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	bool PreflightPayload(
@@ -53,40 +122,55 @@ namespace
 		int32& OutPointCount,
 		FString& OutError)
 	{
-		int64 EstimatedJsonBytes = 1024;
 		int64 TotalPoints = 0;
 		for (const FEChartsSeriesData& Item : Series)
 		{
-			TotalPoints += Item.Num();
-			EstimatedJsonBytes += Utf8Bytes(Item.Name) * 6 + 128;
+			if (!TryAddBytes(Item.Num(), FEChartsPayloadBuilder::MaxPointCount, TotalPoints))
+			{
+				OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount);
+				return false;
+			}
+		}
+
+		int64 EstimatedJsonBytes = 1024;
+		for (const FEChartsSeriesData& Item : Series)
+		{
+			if (!TryAccumulateJsonStringBytes(Item.Name, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+				!TryAddBytes(128, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+			{
+				OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
+				return false;
+			}
 			switch (Item.Type)
 			{
 			case EEChartsSeriesDataType::Unset:
 				break;
 			case EEChartsSeriesDataType::Numeric2D:
-				EstimatedJsonBytes += static_cast<int64>(Item.Numeric2D.Num()) * 72;
+				if (!TryAddBytes(static_cast<int64>(Item.Numeric2D.Num()) * 72, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+				{
+					OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
+					return false;
+				}
 				break;
 			case EEChartsSeriesDataType::Category:
 				for (const FEChartsCategoryDataPoint& Point : Item.Category)
 				{
-					EstimatedJsonBytes += Utf8Bytes(Point.X) * 6 + 48;
+					if (!TryAccumulateJsonStringBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAddBytes(48, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+					{
+						OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
+						return false;
+					}
 				}
 				break;
 			case EEChartsSeriesDataType::Data3D:
-				EstimatedJsonBytes += static_cast<int64>(Item.Data3D.Num()) * 184;
+				if (!TryAddBytes(static_cast<int64>(Item.Data3D.Num()) * 184, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+				{
+					OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
+					return false;
+				}
 				break;
 			}
-		}
-
-		if (TotalPoints > FEChartsPayloadBuilder::MaxPointCount)
-		{
-			OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount);
-			return false;
-		}
-		if (EstimatedJsonBytes > FEChartsPayloadBuilder::MaxJsonBytes)
-		{
-			OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
-			return false;
 		}
 
 		OutPointCount = static_cast<int32>(TotalPoints);
@@ -121,6 +205,10 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 	{
 		return false;
 	}
+
+#if WITH_DEV_AUTOMATION_TESTS
+	++GSerializationAttemptCount;
+#endif
 
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetNumberField(TEXT("revision"), static_cast<double>(Revision));
@@ -194,7 +282,25 @@ bool FEChartsPayloadBuilder::DecodeBase64Payload(const FString& Base64, FString&
 {
 	OutJson.Reset();
 	OutError.Reset();
+	const int64 EncodedLength = Base64.Len();
+	if (EncodedLength == 0 || EncodedLength % 4 != 0)
+	{
+		OutError = TEXT("Invalid Base64 ECharts payload.");
+		return false;
+	}
+	int32 Padding = 0;
+	if (Base64.EndsWith(TEXT("=="))) Padding = 2;
+	else if (Base64.EndsWith(TEXT("="))) Padding = 1;
+	const int64 MaximumDecodedBytes = (EncodedLength / 4) * 3 - Padding;
+	if (MaximumDecodedBytes > MaxJsonBytes)
+	{
+		OutError = FString::Printf(TEXT("Decoded ECharts payload exceeds the %d byte JSON safety limit."), MaxJsonBytes);
+		return false;
+	}
 	TArray<uint8> Bytes;
+#if WITH_DEV_AUTOMATION_TESTS
+	++GDecodeAttemptCount;
+#endif
 	if (!FBase64::Decode(Base64, Bytes))
 	{
 		OutError = TEXT("Invalid Base64 ECharts payload.");
@@ -209,3 +315,29 @@ bool FEChartsPayloadBuilder::DecodeBase64Payload(const FString& Base64, FString&
 	OutJson = FString(Converted.Length(), Converted.Get());
 	return true;
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+void FEChartsPayloadBuilder::ResetSafetyInstrumentationForTesting()
+{
+	GSerializationAttemptCount = 0;
+	GDecodeAttemptCount = 0;
+}
+
+int32 FEChartsPayloadBuilder::GetSerializationAttemptCountForTesting()
+{
+	return GSerializationAttemptCount;
+}
+
+int32 FEChartsPayloadBuilder::GetDecodeAttemptCountForTesting()
+{
+	return GDecodeAttemptCount;
+}
+
+bool FEChartsPayloadBuilder::AccumulateJsonStringBytesForTesting(
+	const FString& Value,
+	const int64 Limit,
+	int64& InOutBytes)
+{
+	return TryAccumulateJsonStringBytes(Value, Limit, InOutBytes);
+}
+#endif

@@ -21,4 +21,11 @@ public:
 		FString& OutError);
 
 	static bool DecodeBase64Payload(const FString& Base64, FString& OutJson, FString& OutError);
+
+#if WITH_DEV_AUTOMATION_TESTS
+	static void ResetSafetyInstrumentationForTesting();
+	static int32 GetSerializationAttemptCountForTesting();
+	static int32 GetDecodeAttemptCountForTesting();
+	static bool AccumulateJsonStringBytesForTesting(const FString& Value, int64 Limit, int64& InOutBytes);
+#endif
 };

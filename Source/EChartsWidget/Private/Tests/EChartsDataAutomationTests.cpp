@@ -79,15 +79,12 @@ namespace EChartsDataTests
 			State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
 			State->SlateWidget = State->Widget->TakeWidget();
 
-			State->Widget->AddDataPoint(0, 1.0, 2.0);
-			State->Widget->AddDataPoint(0, 3.0, 4.0);
-			State->Widget->AddDataPoint(1, 5.0, 6.0);
-			TArray<FEChartsCategoryDataPoint> Category = {{TEXT("A"), 7.0}, {TEXT("B"), 8.0}};
-			State->Widget->SetCategorySeriesData(2, Category);
-			TArray<FEChartsDataPoint3D> Data3D = {{9.0, 10.0, 11.0, 12.0, 13.0}};
-			State->Widget->Set3DData(3, Data3D);
+			TArray<FEChartsCategoryDataPoint> First = {{TEXT("A"), 1.0}, {TEXT("B"), 2.0}};
+			TArray<FEChartsCategoryDataPoint> Second = {{TEXT("B"), 3.0}, {TEXT("A"), 4.0}};
+			State->Widget->SetCategorySeriesData(0, First);
+			State->Widget->SetCategorySeriesData(1, Second);
 			State->Widget->SetXAxisMode(EEChartsXAxisMode::Category);
-			State->Widget->InitializeECharts(EEChartsTemplate::DataTableScatter3D, EEChartsInteractionMode::ClickOnly);
+			State->Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
 			State->Widget->ApplyEChartsChanges();
 			State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0;
 			return true;
@@ -115,14 +112,14 @@ namespace EChartsDataTests
 			if (State->Sink->AppliedCount > 0)
 			{
 				Test->TestEqual(TEXT("Real CEF emitted one APPLIED marker"), State->Sink->AppliedCount, 1);
-				Test->TestEqual(TEXT("Real CEF APPLIED point count"), State->Sink->LastAppliedPointCount, 6);
-				Test->TestEqual(TEXT("Real CEF APPLIED revision"), State->Sink->LastAppliedRevision, int64(6));
+				Test->TestEqual(TEXT("Real CEF APPLIED point count"), State->Sink->LastAppliedPointCount, 4);
+				Test->TestEqual(TEXT("Real CEF APPLIED revision"), State->Sink->LastAppliedRevision, int64(3));
 				State->Widget->ExecuteJavascript(TEXT(
 					"(function(){var o=window.UEEChartsHost.getOptionForTesting();"
 					"var x=Array.isArray(o.xAxis)?o.xAxis[0]:o.xAxis;"
-					"var ok=o.series.length===4&&o.series[0].data.length===2&&o.series[0].data[1][1]===4&&"
-					"o.series[1].data.length===1&&o.series[2].data[0]===7&&o.series[3].type==='scatter3D'&&"
-					"o.series[3].data[0][4]===13&&x.type==='category'&&x.data[1]==='B';"
+					"var ok=x.type==='category'&&JSON.stringify(x.data)===JSON.stringify(['A','B'])&&"
+					"JSON.stringify(o.series[0].data)===JSON.stringify([1,2])&&"
+					"JSON.stringify(o.series[1].data)===JSON.stringify([4,3]);"
 					"console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"));
 				State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0;
 				return true;
@@ -141,6 +138,85 @@ namespace EChartsDataTests
 		FAutomationTestBase* Test;
 	};
 
+	class FStart3DTemplateCommand : public IAutomationLatentCommand
+	{
+	public:
+		FStart3DTemplateCommand(
+			const TSharedRef<FDataBrowserState>& InState,
+			const EEChartsTemplate InTemplate,
+			const bool bInForceFallback)
+			: State(InState), Template(InTemplate), bForceFallback(bInForceFallback) {}
+
+		virtual bool Update() override
+		{
+			State->Widget = MakeWidget();
+			State->Sink = NewObject<UEChartsWidgetTestSink>();
+			State->Sink->AddToRoot();
+			State->Widget->OnEChartsApplied.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleApplied);
+			State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+			State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
+			State->Widget->SetForceWebGLUnavailableForTesting(bForceFallback);
+			State->SlateWidget = State->Widget->TakeWidget();
+			TArray<FEChartsDataPoint3D> Data3D = {{1.0, 2.0, 3.0, 4.0, 5.0}};
+			State->Widget->Set3DData(0, Data3D);
+			State->Widget->InitializeECharts(Template, EEChartsInteractionMode::ClickOnly);
+			State->Widget->ApplyEChartsChanges();
+			State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0;
+			return true;
+		}
+
+	private:
+		TSharedRef<FDataBrowserState> State;
+		EEChartsTemplate Template;
+		bool bForceFallback;
+	};
+
+	class FWaitFor3DTemplateAppliedCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitFor3DTemplateAppliedCommand(
+			const TSharedRef<FDataBrowserState>& InState,
+			FAutomationTestBase* InTest,
+			const FString& InExpectedType)
+			: State(InState), Test(InTest), ExpectedType(InExpectedType) {}
+
+		virtual bool Update() override
+		{
+			if (State->Sink->ErrorCount > 0)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("CEF 3D data apply failed for %s: %s"), *ExpectedType, *State->Sink->LastError));
+				return true;
+			}
+			if (State->Sink->AppliedCount > 0)
+			{
+				Test->TestEqual(TEXT("3D CEF APPLIED point count"), State->Sink->LastAppliedPointCount, 1);
+				Test->TestEqual(TEXT("3D CEF APPLIED revision"), State->Sink->LastAppliedRevision, int64(1));
+				const bool bExpect3D = ExpectedType.EndsWith(TEXT("3D"));
+				State->Widget->ExecuteJavascript(FString::Printf(TEXT(
+					"(function(){var o=window.UEEChartsHost.getOptionForTesting();var s=o.series[0];"
+					"var hasGrid=!!o.grid3D;var ok=s.type==='%s'&&JSON.stringify(s.data[0])===JSON.stringify([1,2,3,4,5])&&"
+					"%s;console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"),
+					*ExpectedType,
+					bExpect3D ? TEXT("hasGrid") : TEXT("!hasGrid&& !/3D$/.test(s.type)")));
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0;
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("Timed out waiting for %s APPLIED marker."), *ExpectedType));
+				return true;
+			}
+			return false;
+		}
+
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+		FString ExpectedType;
+	};
+
 	class FWaitForDataProbeCommand : public IAutomationLatentCommand
 	{
 	public:
@@ -151,7 +227,7 @@ namespace EChartsDataTests
 		{
 			if (State->bFailed || State->Sink->DataOptionReportCount > 0)
 			{
-				if (!State->bFailed) Test->TestTrue(TEXT("CEF getOption contains all 2D/category/3D data"), State->Sink->bLastDataOptionSucceeded);
+				if (!State->bFailed) Test->TestTrue(TEXT("CEF getOption preserves mapped data semantics"), State->Sink->bLastDataOptionSucceeded);
 				State->Cleanup();
 				return true;
 			}
@@ -324,6 +400,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsPayloadLimitsTest,
 	"EChartsWidget.Data.PayloadLimits", EChartsDataTests::Flags)
 bool FEChartsPayloadLimitsTest::RunTest(const FString& Parameters)
 {
+	FEChartsPayloadBuilder::ResetSafetyInstrumentationForTesting();
 	TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> Series;
 	Series[0].Type = EEChartsSeriesDataType::Numeric2D;
 	Series[0].Numeric2D.SetNum(FEChartsPayloadBuilder::MaxPointCount + 1);
@@ -334,11 +411,33 @@ bool FEChartsPayloadLimitsTest::RunTest(const FString& Parameters)
 		EEChartsTemplate::SegmentedAreaLine, EEChartsXAxisMode::ShowAll, Series, 1, Base64, PointCount, Error));
 	TestTrue(TEXT("Point limit error is clear"), Error.Contains(TEXT("100000")));
 	TestTrue(TEXT("Failure does not allocate output"), Base64.IsEmpty());
+	TestEqual(TEXT("Point preflight rejects before serializer"),
+		FEChartsPayloadBuilder::GetSerializationAttemptCountForTesting(), 0);
 	Series[0].Numeric2D.Reset();
-	Series[0].Name = FString::ChrN(FEChartsPayloadBuilder::MaxJsonBytes / 2 + 1, TEXT('X'));
+	Series[0].Name = FString::ChrN(FEChartsPayloadBuilder::MaxJsonBytes / 6 + 1, TCHAR(1));
 	TestFalse(TEXT("Oversized UTF-8 JSON estimate fails before serialization"), FEChartsPayloadBuilder::BuildBase64Payload(
 		EEChartsTemplate::SegmentedAreaLine, EEChartsXAxisMode::ShowAll, Series, 1, Base64, PointCount, Error));
 	TestTrue(TEXT("JSON byte limit error is clear"), Error.Contains(TEXT("16777216")));
+	TestEqual(TEXT("Long escaped control string rejects before serializer"),
+		FEChartsPayloadBuilder::GetSerializationAttemptCountForTesting(), 0);
+
+	int64 EstimatedBytes = 0;
+	TestTrue(TEXT("Non-BMP string estimate succeeds"), FEChartsPayloadBuilder::AccumulateJsonStringBytesForTesting(
+		TEXT("A😀\n"), FEChartsPayloadBuilder::MaxJsonBytes, EstimatedBytes));
+	TestEqual(TEXT("ASCII + emoji + escaped newline byte estimate"), EstimatedBytes, int64(7));
+	EstimatedBytes = TNumericLimits<int64>::Max() - 1;
+	TestFalse(TEXT("Checked byte accumulation rejects integer overflow"), FEChartsPayloadBuilder::AccumulateJsonStringBytesForTesting(
+		TEXT("AB"), TNumericLimits<int64>::Max(), EstimatedBytes));
+
+	FEChartsPayloadBuilder::ResetSafetyInstrumentationForTesting();
+	const int32 OversizedBase64Length = 4 * ((FEChartsPayloadBuilder::MaxJsonBytes + 3) / 3);
+	const FString OversizedBase64 = FString::ChrN(OversizedBase64Length, TEXT('A'));
+	FString Decoded;
+	TestFalse(TEXT("Encoded length rejects oversized decode before allocation"),
+		FEChartsPayloadBuilder::DecodeBase64Payload(OversizedBase64, Decoded, Error));
+	TestTrue(TEXT("Oversized decode leaves output empty"), Decoded.IsEmpty());
+	TestEqual(TEXT("Oversized encoded input never invokes Base64 decoder"),
+		FEChartsPayloadBuilder::GetDecodeAttemptCountForTesting(), 0);
 	return true;
 }
 
@@ -410,6 +509,36 @@ bool FEChartsCEFDataApplyTest::RunTest(const FString& Parameters)
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FStartDataBrowserCommand(State, this));
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitForDataAppliedCommand(State, this));
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitForDataProbeCommand(State, this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEF3DEffectiveTemplatesTest,
+	"EChartsWidget.Integration.CEF3DEffectiveTemplates", EChartsDataTests::Flags)
+bool FEChartsCEF3DEffectiveTemplatesTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI")))
+	{
+		AddInfo(TEXT("Not executed under NullRHI: real CEF 3D template mapping requires D3D12."));
+		return true;
+	}
+	if (!FSlateApplication::IsInitialized())
+	{
+		AddError(TEXT("Real CEF 3D template mapping requires initialized Slate."));
+		return false;
+	}
+
+#define ADD_3D_CEF_CASE(TemplateValue, ForceFallback, ExpectedTypeValue) \
+	{ \
+		const TSharedRef<EChartsDataTests::FDataBrowserState> State = MakeShared<EChartsDataTests::FDataBrowserState>(); \
+		ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FStart3DTemplateCommand(State, TemplateValue, ForceFallback)); \
+		ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitFor3DTemplateAppliedCommand(State, this, TEXT(ExpectedTypeValue))); \
+		ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitForDataProbeCommand(State, this)); \
+	}
+	ADD_3D_CEF_CASE(EEChartsTemplate::Bar3DHeightMap, false, "bar3D");
+	ADD_3D_CEF_CASE(EEChartsTemplate::DataTableScatter3D, false, "scatter3D");
+	ADD_3D_CEF_CASE(EEChartsTemplate::Bar3DHeightMap, true, "heatmap");
+	ADD_3D_CEF_CASE(EEChartsTemplate::DataTableScatter3D, true, "scatter");
+#undef ADD_3D_CEF_CASE
 	return true;
 }
 

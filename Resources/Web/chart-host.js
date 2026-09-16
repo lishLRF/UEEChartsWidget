@@ -94,21 +94,51 @@
       if (!currentOption || !currentEffectiveTemplate) throw new Error('Template must be rendered before applying data');
       const option = clone(currentOption);
       const oldSeries = Array.isArray(option.series) ? option.series : (option.series ? [option.series] : []);
-      let categoryLabels = null;
+      const categoryLabels = [];
+      const categoryLabelSet = new Set();
+      payload.series.forEach(function (series) {
+        if (series.type !== 'category') return;
+        series.data.forEach(function (point) {
+          if (!categoryLabelSet.has(point[0])) {
+            categoryLabelSet.add(point[0]);
+            categoryLabels.push(point[0]);
+          }
+        });
+      });
       let has2DSeries = false;
       option.series = payload.series.map(function (input, index) {
         const prototype = oldSeries[index] || oldSeries[0] || {};
         const output = Object.assign({}, clone(prototype), { name: input.name });
         if (input.type === 'category') {
           has2DSeries = true;
-          categoryLabels = categoryLabels || input.data.map(function (point) { return point[0]; });
+          const valuesByLabel = new Map();
+          input.data.forEach(function (point) { valuesByLabel.set(point[0], point[1]); });
           output.type = 'line';
-          output.data = input.data.map(function (point) { return point[1]; });
+          output.data = categoryLabels.map(function (label) {
+            return valuesByLabel.has(label) ? valuesByLabel.get(label) : null;
+          });
         } else if (input.type === 'data3D') {
-          output.type = 'scatter3D';
+          const hasGrid3D = !!option.grid3D;
+          if (currentEffectiveTemplate === 'Bar3DHeightMap' && hasGrid3D) {
+            output.type = 'bar3D';
+          } else if (currentEffectiveTemplate === 'DataTableScatter3D' && hasGrid3D) {
+            output.type = 'scatter3D';
+          } else if (currentEffectiveTemplate === 'Bar3DHeightMap2D') {
+            output.type = 'heatmap';
+            has2DSeries = true;
+          } else {
+            output.type = 'scatter';
+            has2DSeries = true;
+          }
           output.data = clone(input.data);
-          output.encode = { x: 0, y: 1, z: 2, tooltip: [0, 1, 2, 3, 4] };
-          output.symbolSize = function (value) { return value[4]; };
+          if (output.type === 'bar3D' || output.type === 'scatter3D') {
+            output.encode = { x: 0, y: 1, z: 2, tooltip: [0, 1, 2, 3, 4] };
+          } else {
+            output.encode = { x: 0, y: 1, value: 2, tooltip: [0, 1, 2, 3, 4] };
+          }
+          if (output.type === 'scatter3D' || output.type === 'scatter') {
+            output.symbolSize = function (value) { return value[4]; };
+          }
         } else {
           has2DSeries = true;
           output.type = currentEffectiveTemplate.indexOf('Scatter') >= 0 ? 'scatter' : 'line';
@@ -124,12 +154,12 @@
       legends.forEach(function (legend) { legend.data = names; });
       option.legend = Array.isArray(option.legend) ? legends : legends[0];
 
-      if (payload.xAxisMode === 'Category' || categoryLabels) {
-        updateAxis(option, 'xAxis', { type: 'category', data: categoryLabels || [] });
-      } else {
-        updateAxis(option, 'xAxis', { type: 'value', data: undefined });
-      }
       if (has2DSeries) {
+        if (payload.xAxisMode === 'Category' || categoryLabels.length > 0) {
+          updateAxis(option, 'xAxis', { type: 'category', data: categoryLabels });
+        } else {
+          updateAxis(option, 'xAxis', { type: 'value', data: undefined });
+        }
         updateAxis(option, 'yAxis', { type: 'value' });
         if (!option.grid) option.grid = { left: 58, right: 24, top: 42, bottom: 44 };
       }
