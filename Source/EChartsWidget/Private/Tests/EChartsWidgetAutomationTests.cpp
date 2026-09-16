@@ -49,6 +49,7 @@ namespace EChartsWidgetTests
 		int32 ExpectedRenderedCount = 0;
 		int32 ExpectedWarningCount = 0;
 		bool bExpectSingleSeries = false;
+		int32 ResizeReportsBefore = 0;
 
 		void Cleanup()
 		{
@@ -173,6 +174,106 @@ namespace EChartsWidgetTests
 		virtual bool Update() override { State->Cleanup(); return true; }
 	private:
 		TSharedRef<FBrowserIntegrationState> State;
+	};
+
+	class FTriggerBrowserResizeCommand : public IAutomationLatentCommand
+	{
+	public:
+		FTriggerBrowserResizeCommand(const TSharedRef<FBrowserIntegrationState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (State->bFailed) return true;
+			State->ResizeReportsBefore = State->Sink->ResizeReportCount;
+			State->Widget->ExecuteJavascript(TEXT(
+				"window.__UE_ECHARTS_TEST_RESIZE_PROBE__=true;"
+				"document.getElementById('chart').style.width='320px';"
+				"document.getElementById('chart').style.height='200px';"));
+			State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0;
+			return true;
+		}
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FWaitForBrowserResizeCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitForBrowserResizeCommand(const TSharedRef<FBrowserIntegrationState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (State->bFailed) return true;
+			if (State->Sink->ResizeReportCount > State->ResizeReportsBefore)
+			{
+				Test->TestTrue(TEXT("CEF ResizeObserver reported a positive width"), State->Sink->LastResizeWidth > 0);
+				Test->TestTrue(TEXT("CEF ResizeObserver reported a positive height"), State->Sink->LastResizeHeight > 0);
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(TEXT("Timed out waiting for event-driven CEF ResizeObserver callback."));
+				return true;
+			}
+			return false;
+		}
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FStartHeightMapLimitErrorCommand : public IAutomationLatentCommand
+	{
+	public:
+		FStartHeightMapLimitErrorCommand(const TSharedRef<FBrowserIntegrationState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			State->Widget = MakeWidget();
+			State->Sink = NewObject<UEChartsWidgetTestSink>();
+			State->Sink->AddToRoot();
+			State->Widget->OnChartRendered.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleRendered);
+			State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+			State->SlateWidget = State->Widget->TakeWidget();
+			State->Widget->SetInitializationPayloadForTesting(TEXT("{\"size\":129}"), false);
+			State->Widget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap, EEChartsInteractionMode::ClickOnly);
+			State->DeadlineSeconds = FPlatformTime::Seconds() + 15.0;
+			return true;
+		}
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FWaitForHeightMapLimitErrorCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitForHeightMapLimitErrorCommand(const TSharedRef<FBrowserIntegrationState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (State->Sink->ErrorCount > 0)
+			{
+				Test->TestTrue(TEXT("CEF size-limit ERROR is clear"), State->Sink->LastError.Contains(TEXT("size")) && State->Sink->LastError.Contains(TEXT("128")));
+				return true;
+			}
+			if (State->Sink->RenderedCount > 0)
+			{
+				Test->AddError(TEXT("Oversized generated height map rendered instead of emitting ERROR."));
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				Test->AddError(TEXT("Timed out waiting for oversized height-map ERROR marker."));
+				return true;
+			}
+			return false;
+		}
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
 	};
 
 	class FStartBrowserGenerationCommand : public IAutomationLatentCommand
@@ -513,6 +614,32 @@ bool FEChartsCEFTemplateRenderingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFResizeObserverTest,
+	"EChartsWidget.Integration.CEFResizeObserver", EChartsWidgetTests::Flags)
+bool FEChartsCEFResizeObserverTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI"))) return true;
+	const TSharedRef<EChartsWidgetTests::FBrowserIntegrationState> State = MakeShared<EChartsWidgetTests::FBrowserIntegrationState>();
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartTemplateRenderCommand(State, this, EEChartsTemplate::SegmentedAreaLine, TEXT("SegmentedAreaLine"), false));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForTemplateRenderCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FTriggerBrowserResizeCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForBrowserResizeCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FFinishTemplateRenderCommand(State));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFHeightMapLimitTest,
+	"EChartsWidget.Integration.CEFHeightMapLimit", EChartsWidgetTests::Flags)
+bool FEChartsCEFHeightMapLimitTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI"))) return true;
+	const TSharedRef<EChartsWidgetTests::FBrowserIntegrationState> State = MakeShared<EChartsWidgetTests::FBrowserIntegrationState>();
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartHeightMapLimitErrorCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForHeightMapLimitErrorCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FFinishTemplateRenderCommand(State));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsLocalResourceUrlTest,
 	"EChartsWidget.LocalResourceUrl", EChartsWidgetTests::Flags)
 bool FEChartsLocalResourceUrlTest::RunTest(const FString& Parameters)
@@ -644,6 +771,15 @@ bool FEChartsStagingRulesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Runtime dependencies are registered"), BuildRules.Contains(TEXT("RuntimeDependencies.Add")));
 	TestTrue(TEXT("Runtime dependencies use NonUFS staging"), BuildRules.Contains(TEXT("StagedFileType.NonUFS")));
 	TestTrue(TEXT("Staging target remains plugin-relative"), BuildRules.Contains(TEXT("$(PluginDir)")));
+
+	FString FilterRules;
+	const FString FilterRulesPath = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Config/FilterPlugin.ini"));
+	TestTrue(TEXT("Plugin filter can be read"), FFileHelper::LoadFileToString(FilterRules, *FilterRulesPath));
+	TestTrue(TEXT("Plugin filter includes all third-party licenses"), FilterRules.Contains(TEXT("/ThirdPartyLicenses/...")));
+	TestTrue(TEXT("Apache ECharts NOTICE is present for staging"), IFileManager::Get().FileExists(
+		*FPaths::Combine(Plugin->GetBaseDir(), TEXT("ThirdPartyLicenses/ECharts-NOTICE.txt"))));
+	TestTrue(TEXT("D3 BSD license is present for staging"), IFileManager::Get().FileExists(
+		*FPaths::Combine(Plugin->GetBaseDir(), TEXT("ThirdPartyLicenses/ECharts-LICENSE-d3.txt"))));
 	return true;
 }
 

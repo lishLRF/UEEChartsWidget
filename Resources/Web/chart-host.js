@@ -14,13 +14,26 @@
     return window.UEEChartsTemplates.detectWebGL(document);
   }
 
+  if (window.UEEChartsHost && typeof window.UEEChartsHost.dispose === 'function') {
+    window.UEEChartsHost.dispose();
+  }
+
   try {
     if (!window.echarts || typeof window.echarts.init !== 'function') throw new Error('Apache ECharts vendor script unavailable');
     if (!window['echarts-gl']) throw new Error('echarts-gl vendor script unavailable');
     if (!window.UEEChartsTemplates || typeof window.UEEChartsTemplates.createTemplate !== 'function') throw new Error('ECharts template runtime unavailable');
-    const chart = window.echarts.init(document.getElementById('chart'), null, { renderer: 'canvas' });
+    const chartElement = document.getElementById('chart');
+    let chart = window.echarts.init(chartElement, null, { renderer: 'canvas' });
+    let resizeObserver = null;
     const webglAvailable = resolveWebGL();
-    window.UEEChartsHost = {
+    function resizeChart() {
+      if (!chart) return;
+      chart.resize();
+      if (window.__UE_ECHARTS_TEST_RESIZE_PROBE__ === true) {
+        emit('TEST_RESIZED', String(Math.round(chart.getWidth())) + ':' + String(Math.round(chart.getHeight())));
+      }
+    }
+    const hostApi = {
       renderTemplate: function (template, payload, interactionMode) {
         try {
           const result = window.UEEChartsTemplates.createTemplate(template, payload || {}, webglAvailable);
@@ -43,9 +56,24 @@
           return null;
         }
       },
-      resize: function () { chart.resize(); },
-      dispose: function () { chart.dispose(); }
+      resize: resizeChart,
+      dispose: function () {
+        if (resizeObserver) {
+          resizeObserver.disconnect();
+          resizeObserver = null;
+        }
+        if (chart) {
+          chart.dispose();
+          chart = null;
+        }
+        if (window.UEEChartsHost === hostApi) {
+          delete window.UEEChartsHost;
+        }
+      }
     };
+    resizeObserver = new ResizeObserver(resizeChart);
+    resizeObserver.observe(chartElement);
+    window.UEEChartsHost = hostApi;
     emit('READY');
   } catch (error) {
     emit('ERROR', error && error.message ? error.message : String(error));

@@ -5,6 +5,9 @@
 }(typeof window !== 'undefined' ? window : globalThis, function () {
   'use strict';
 
+  const MAX_HEIGHT_MAP_SIDE = 128;
+  const MAX_GENERATED_POINTS = MAX_HEIGHT_MAP_SIDE * MAX_HEIGHT_MAP_SIDE;
+
   function clone(value) {
     if (Array.isArray(value)) return value.map(clone);
     if (value && typeof value === 'object') {
@@ -67,10 +70,14 @@
   }
 
   function heightMapInput(payload) {
-    const size = Number.isInteger(payload.size) && payload.size > 1 ? payload.size : 10;
+    const size = payload.size === undefined ? 10 : payload.size;
+    if (!Number.isFinite(size) || !Number.isInteger(size) || size < 1 || size > MAX_HEIGHT_MAP_SIDE) {
+      throw new Error('Bar3DHeightMap size must be an integer between 1 and ' + MAX_HEIGHT_MAP_SIDE + '.');
+    }
+    const hasData = Array.isArray(payload.data);
     return {
       size: size,
-      data: Array.isArray(payload.data) ? payload.data : deterministicHeightData(size),
+      data: hasData ? payload.data : deterministicHeightData(size),
       categories: Array.from({ length: size }, function (_, index) { return String(index); })
     };
   }
@@ -148,31 +155,56 @@
 
   function applyInteractionMode(sourceOption, interactionMode) {
     const option = clone(sourceOption);
-    option.tooltip = option.tooltip || {};
-    option.legend = option.legend || {};
-    if (!Array.isArray(option.series)) {
-      option.series = option.series && typeof option.series === 'object' ? [option.series] : [];
+    const visited = new WeakSet();
+
+    function components(value) {
+      if (Array.isArray(value)) return value.filter(function (item) { return item && typeof item === 'object'; });
+      return value && typeof value === 'object' ? [value] : [];
     }
-    const viewControl = option.grid3D && (option.grid3D.viewControl = option.grid3D.viewControl || {});
-    if (interactionMode === 'Disabled') {
-      option.tooltip.show = false; option.tooltip.triggerOn = 'none'; option.legend.selectedMode = false;
-      option.series.forEach(function (series) { series.silent = true; });
-      if (viewControl) { viewControl.rotateSensitivity = 0; viewControl.zoomSensitivity = 0; viewControl.panSensitivity = 0; viewControl.autoRotate = false; }
-      return option;
+
+    function applyScope(scope) {
+      if (!scope || typeof scope !== 'object' || Array.isArray(scope) || visited.has(scope)) return;
+      visited.add(scope);
+      const disabled = interactionMode === 'Disabled';
+      const fullHover = interactionMode === 'FullHover';
+
+      components(scope.tooltip).forEach(function (tooltip) {
+        tooltip.show = !disabled;
+        tooltip.triggerOn = disabled ? 'none' : (fullHover ? 'mousemove|click' : 'click');
+      });
+      components(scope.legend).forEach(function (legend) { legend.selectedMode = !disabled; });
+
+      if (!Array.isArray(scope.series)) {
+        scope.series = scope.series && typeof scope.series === 'object' ? [scope.series] : [];
+      }
+      scope.series.forEach(function (series) {
+        if (series && typeof series === 'object') series.silent = disabled;
+      });
+
+      components(scope.grid3D).forEach(function (grid3D) {
+        if (!grid3D.viewControl || typeof grid3D.viewControl !== 'object' || Array.isArray(grid3D.viewControl)) {
+          grid3D.viewControl = {};
+        }
+        grid3D.viewControl.rotateSensitivity = disabled ? 0 : 1;
+        grid3D.viewControl.zoomSensitivity = disabled || !fullHover ? 0 : 1;
+        grid3D.viewControl.panSensitivity = disabled || !fullHover ? 0 : 1;
+        grid3D.viewControl.autoRotate = false;
+      });
+
+      applyScope(scope.baseOption);
+      if (Array.isArray(scope.options)) scope.options.forEach(applyScope);
+      if (Array.isArray(scope.media)) {
+        scope.media.forEach(function (mediaItem) {
+          if (mediaItem && typeof mediaItem === 'object') applyScope(mediaItem.option);
+        });
+      }
     }
-    option.tooltip.show = true;
-    option.tooltip.triggerOn = interactionMode === 'FullHover' ? 'mousemove|click' : 'click';
-    option.legend.selectedMode = true;
-    option.series.forEach(function (series) { series.silent = false; });
-    if (viewControl) {
-      viewControl.rotateSensitivity = 1;
-      viewControl.zoomSensitivity = interactionMode === 'FullHover' ? 1 : 0;
-      viewControl.panSensitivity = interactionMode === 'FullHover' ? 1 : 0;
-      viewControl.autoRotate = false;
-    }
+
+    applyScope(option);
     return option;
   }
 
   return { applyInteractionMode: applyInteractionMode, createTemplate: createTemplate,
-    detectWebGL: detectWebGL, selectEffectiveTemplate: selectEffectiveTemplate };
+    detectWebGL: detectWebGL, selectEffectiveTemplate: selectEffectiveTemplate,
+    limits: { maxHeightMapSide: MAX_HEIGHT_MAP_SIDE, maxGeneratedPoints: MAX_GENERATED_POINTS } };
 }));

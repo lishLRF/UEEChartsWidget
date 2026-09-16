@@ -33,6 +33,14 @@ test('bundles pinned official ECharts distributions with verified metadata', () 
     assert.match(item.sha256, /^[a-f0-9]{64}$/);
     assert.equal(item.sha256, sha256(path.join(vendorRoot, item.file)));
   }
+
+  const echartsLicenseFiles = manifest.packages.echarts.licenseFiles;
+  assert.deepEqual(echartsLicenseFiles.map((entry) => entry.upstreamPath), ['NOTICE', 'licenses/LICENSE-d3']);
+  for (const entry of echartsLicenseFiles) {
+    const filePath = path.join(pluginRoot, entry.file);
+    assert.match(entry.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(entry.sha256, sha256(filePath));
+  }
 });
 
 test('ships vendor license texts and notices without package-manager residue', () => {
@@ -40,8 +48,12 @@ test('ships vendor license texts and notices without package-manager residue', (
   const attributes = read('.gitattributes');
   assert.match(notices, /Apache ECharts 6\.1\.0/);
   assert.match(notices, /echarts-gl 2\.1\.0/);
+  assert.match(notices, /Apache Software Foundation/);
+  assert.match(notices, /D3.*BSD|BSD.*D3/i);
   assert.ok(fs.existsSync(path.join(pluginRoot, 'ThirdPartyLicenses', 'Apache-ECharts-6.1.0.txt')));
   assert.ok(fs.existsSync(path.join(pluginRoot, 'ThirdPartyLicenses', 'echarts-gl-2.1.0.txt')));
+  assert.ok(fs.existsSync(path.join(pluginRoot, 'ThirdPartyLicenses', 'ECharts-NOTICE.txt')));
+  assert.ok(fs.existsSync(path.join(pluginRoot, 'ThirdPartyLicenses', 'ECharts-LICENSE-d3.txt')));
   assert.equal(fs.existsSync(path.join(pluginRoot, 'node_modules')), false);
   assert.equal(fs.existsSync(path.join(pluginRoot, 'package-lock.json')), false);
   assert.equal(fs.readdirSync(vendorRoot).some((name) => /\.(tgz|tar|zip)$/i.test(name)), false);

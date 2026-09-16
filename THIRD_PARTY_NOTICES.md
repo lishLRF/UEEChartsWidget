@@ -7,6 +7,9 @@ This plugin redistributes the following unmodified browser distributions for off
 - Source: https://registry.npmjs.org/echarts/-/echarts-6.1.0.tgz
 - License: Apache License 2.0
 - License text: `ThirdPartyLicenses/Apache-ECharts-6.1.0.txt`
+- NOTICE: `ThirdPartyLicenses/ECharts-NOTICE.txt`
+- Copyright 2017-2026 The Apache Software Foundation. This product includes software developed at The Apache Software Foundation.
+- Bundled D3-derived code: BSD license in `ThirdPartyLicenses/ECharts-LICENSE-d3.txt`
 
 ## echarts-gl 2.1.0
 

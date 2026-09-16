@@ -28,18 +28,30 @@ public:
 	UFUNCTION()
 	void HandleConsoleMessage(const FString& Message, const FString& Source, int32 Line)
 	{
-		const FString Marker = TEXT("__UE_ECHARTS_TEST_SERIES_COUNT__:");
-		if (!Message.StartsWith(Marker))
+		const FString SeriesMarker = TEXT("__UE_ECHARTS_TEST_SERIES_COUNT__:");
+		if (Message.StartsWith(SeriesMarker))
 		{
+			FString Generation;
+			FString Count;
+			if (Message.RightChop(SeriesMarker.Len()).Split(TEXT(":"), &Generation, &Count) &&
+				LexTryParseString(LastSeriesCount, *Count))
+			{
+				++SeriesCountReportCount;
+			}
 			return;
 		}
 
-		FString Generation;
-		FString Count;
-		if (Message.RightChop(Marker.Len()).Split(TEXT(":"), &Generation, &Count) &&
-			LexTryParseString(LastSeriesCount, *Count))
+		const FString ResizeMarker = TEXT("__UE_ECHARTS_TEST_RESIZED__:");
+		if (Message.StartsWith(ResizeMarker))
 		{
-			++SeriesCountReportCount;
+			TArray<FString> Parts;
+			Message.RightChop(ResizeMarker.Len()).ParseIntoArray(Parts, TEXT(":"), false);
+			if (Parts.Num() == 3 &&
+				LexTryParseString(LastResizeWidth, *Parts[1]) &&
+				LexTryParseString(LastResizeHeight, *Parts[2]))
+			{
+				++ResizeReportCount;
+			}
 		}
 	}
 
@@ -63,6 +75,9 @@ public:
 	int32 ErrorCount = 0;
 	int32 SeriesCountReportCount = 0;
 	int32 LastSeriesCount = INDEX_NONE;
+	int32 ResizeReportCount = 0;
+	int32 LastResizeWidth = 0;
+	int32 LastResizeHeight = 0;
 	FString LastWarning;
 	FString LastError;
 	EEChartsTemplate LastRequestedTemplate = EEChartsTemplate::SegmentedAreaLine;

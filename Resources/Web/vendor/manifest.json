@@ -5,7 +5,23 @@
       "license": "Apache-2.0",
       "source": "https://registry.npmjs.org/echarts/-/echarts-6.1.0.tgz",
       "file": "echarts.min.js",
-      "sha256": "b66b25aeb4df84e33199dc21694014d336d222cbd9deb0e5a7c14bd6aa0d0fd0"
+      "sha256": "b66b25aeb4df84e33199dc21694014d336d222cbd9deb0e5a7c14bd6aa0d0fd0",
+      "licenseFiles": [
+        {
+          "version": "6.1.0",
+          "source": "https://registry.npmjs.org/echarts/-/echarts-6.1.0.tgz",
+          "upstreamPath": "NOTICE",
+          "file": "ThirdPartyLicenses/ECharts-NOTICE.txt",
+          "sha256": "d491d358344f842685c1b1585970999db65fe30ecf7ef3867af8814f4016c016"
+        },
+        {
+          "version": "6.1.0",
+          "source": "https://registry.npmjs.org/echarts/-/echarts-6.1.0.tgz",
+          "upstreamPath": "licenses/LICENSE-d3",
+          "file": "ThirdPartyLicenses/ECharts-LICENSE-d3.txt",
+          "sha256": "e1211892da0b0e0585b7aebe8f98c1274fba15bafe47fa1f4ee8a7a502c06304"
+        }
+      ]
     },
     "echarts-gl": {
       "version": "2.1.0",
