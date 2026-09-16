@@ -105,6 +105,7 @@ public:
 	void RebindConsoleMessageForTesting();
 	void PrepareRebuildForTesting();
 	void SetForceWebGLUnavailableForTesting(bool bForceUnavailable);
+	void SetInitializationPayloadForTesting(const FString& PayloadJson, bool bReportSeriesCount);
 #endif
 
 protected:
@@ -125,6 +126,8 @@ private:
 	bool bReloadOnRebuild = false;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
+	bool bReportSeriesCountForTesting = false;
+	FString InitializationPayloadForTesting = TEXT("{}");
 #endif
 };
 

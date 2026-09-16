@@ -38,9 +38,14 @@ test('builds segmented area, scatter3D fallback, and custom option without netwo
   assert.equal(scatterFallback.effectiveTemplate, 'DataTableScatter2D');
   assert.equal(scatterFallback.option.series[0].type, 'scatter');
 
-  const custom = templates.createTemplate('CustomOption', { option: { title: { text: 'Offline' }, series: [] } }, false);
+  const singleSeries = { name: 'Only', type: 'line', data: [3, 1, 4], smooth: true };
+  const custom = templates.createTemplate('CustomOption', { option: { title: { text: 'Offline' }, series: singleSeries } }, false);
   assert.equal(custom.option.title.text, 'Offline');
   assert.equal(custom.option.animation, false);
+  const interactiveCustom = templates.applyInteractionMode(custom.option, 'ClickOnly');
+  assert.ok(Array.isArray(interactiveCustom.series));
+  assert.equal(interactiveCustom.series.length, 1);
+  assert.deepEqual(interactiveCustom.series[0], { ...singleSeries, silent: false });
 
   const source = fs.readFileSync(templatesPath, 'utf8');
   assert.doesNotMatch(source, /https?:\/\/|fetch\s*\(|XMLHttpRequest|jquery|simplex-noise/i);

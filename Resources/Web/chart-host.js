@@ -30,6 +30,11 @@
           }
           chart.clear();
           chart.setOption(option, { notMerge: true, lazyUpdate: false });
+          if (parameters.get('testSeriesProbe') === '1') {
+            const appliedOption = chart.getOption();
+            const seriesCount = Array.isArray(appliedOption.series) ? appliedOption.series.length : 0;
+            emit('TEST_SERIES_COUNT', String(seriesCount));
+          }
           emit('RENDERED', result.requestedTemplate + ':' + result.effectiveTemplate);
           return result.effectiveTemplate;
         } catch (error) {

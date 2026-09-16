@@ -48,6 +48,7 @@ namespace EChartsWidgetTests
 		FString ExpectedEffectiveTemplate;
 		int32 ExpectedRenderedCount = 0;
 		int32 ExpectedWarningCount = 0;
+		bool bExpectSingleSeries = false;
 
 		void Cleanup()
 		{
@@ -74,10 +75,13 @@ namespace EChartsWidgetTests
 			FAutomationTestBase* InTest,
 			const EEChartsTemplate InTemplate,
 			const FString& InExpectedEffectiveTemplate,
-			const bool bInForceWebGLUnavailable)
+			const bool bInForceWebGLUnavailable,
+			const FString& InPayloadJson = TEXT("{}"),
+			const bool bInExpectSingleSeries = false)
 			: State(InState), Test(InTest), Template(InTemplate),
 			  ExpectedEffectiveTemplate(InExpectedEffectiveTemplate),
-			  bForceWebGLUnavailable(bInForceWebGLUnavailable)
+			  bForceWebGLUnavailable(bInForceWebGLUnavailable),
+			  PayloadJson(InPayloadJson), bExpectSingleSeries(bInExpectSingleSeries)
 		{
 		}
 
@@ -93,11 +97,14 @@ namespace EChartsWidgetTests
 				State->Widget->OnChartRendered.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleRendered);
 				State->Widget->OnEChartsWarning.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleWarning);
 				State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+				State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
 				State->SlateWidget = State->Widget->TakeWidget();
 			}
 			State->Widget->SetForceWebGLUnavailableForTesting(bForceWebGLUnavailable);
+			State->Widget->SetInitializationPayloadForTesting(PayloadJson, bExpectSingleSeries);
 			State->Widget->InitializeECharts(Template, EEChartsInteractionMode::ClickOnly);
 			State->ExpectedEffectiveTemplate = ExpectedEffectiveTemplate;
+			State->bExpectSingleSeries = bExpectSingleSeries;
 			++State->ExpectedRenderedCount;
 			if (bForceWebGLUnavailable &&
 				(Template == EEChartsTemplate::Bar3DHeightMap || Template == EEChartsTemplate::DataTableScatter3D))
@@ -114,6 +121,8 @@ namespace EChartsWidgetTests
 		EEChartsTemplate Template;
 		FString ExpectedEffectiveTemplate;
 		bool bForceWebGLUnavailable;
+		FString PayloadJson;
+		bool bExpectSingleSeries;
 	};
 
 	class FWaitForTemplateRenderCommand : public IAutomationLatentCommand
@@ -136,6 +145,11 @@ namespace EChartsWidgetTests
 				Test->TestEqual(TEXT("CEF emitted one rendered marker per requested template"), State->Sink->RenderedCount, State->ExpectedRenderedCount);
 				Test->TestEqual(TEXT("CEF rendered the expected WebGL or fallback template"), State->Widget->EffectiveTemplate, State->ExpectedEffectiveTemplate);
 				Test->TestEqual(TEXT("CEF emitted expected fallback warnings"), State->Sink->WarningCount, State->ExpectedWarningCount);
+				if (State->bExpectSingleSeries)
+				{
+					Test->TestEqual(TEXT("CEF reported the applied CustomOption series"), State->Sink->SeriesCountReportCount, 1);
+					Test->TestEqual(TEXT("CEF preserved one CustomOption series"), State->Sink->LastSeriesCount, 1);
+				}
 				return true;
 			}
 			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
@@ -485,7 +499,15 @@ bool FEChartsCEFTemplateRenderingTest::RunTest(const FString& Parameters)
 	ADD_RENDER_CASE(EEChartsTemplate::DataTableScatter3D, "DataTableScatter3D", false);
 	ADD_RENDER_CASE(EEChartsTemplate::Bar3DHeightMap, "Bar3DHeightMap2D", true);
 	ADD_RENDER_CASE(EEChartsTemplate::DataTableScatter3D, "DataTableScatter2D", true);
-	ADD_RENDER_CASE(EEChartsTemplate::CustomOption, "CustomOption", false);
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartTemplateRenderCommand(
+		State,
+		this,
+		EEChartsTemplate::CustomOption,
+		TEXT("CustomOption"),
+		false,
+		TEXT("{\"option\":{\"xAxis\":{\"type\":\"category\",\"data\":[\"A\",\"B\",\"C\"]},\"yAxis\":{\"type\":\"value\"},\"series\":{\"name\":\"Only\",\"type\":\"line\",\"data\":[3,1,4],\"smooth\":true}}}"),
+		true));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForTemplateRenderCommand(State, this));
 #undef ADD_RENDER_CASE
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FFinishTemplateRenderCommand(State));
 	return true;

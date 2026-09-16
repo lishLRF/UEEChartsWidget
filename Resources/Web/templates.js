@@ -150,7 +150,9 @@
     const option = clone(sourceOption);
     option.tooltip = option.tooltip || {};
     option.legend = option.legend || {};
-    option.series = Array.isArray(option.series) ? option.series : [];
+    if (!Array.isArray(option.series)) {
+      option.series = option.series && typeof option.series === 'object' ? [option.series] : [];
+    }
     const viewControl = option.grid3D && (option.grid3D.viewControl = option.grid3D.viewControl || {});
     if (interactionMode === 'Disabled') {
       option.tooltip.show = false; option.tooltip.triggerOn = 'none'; option.legend.selectedMode = false;

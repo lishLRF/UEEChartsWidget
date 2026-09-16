@@ -102,6 +102,10 @@ void UEChartsWidget::BeginLoadGeneration()
 	{
 		InitialURL += TEXT("&forceWebGL=0");
 	}
+	if (bReportSeriesCountForTesting)
+	{
+		InitialURL += TEXT("&testSeriesProbe=1");
+	}
 #endif
 }
 
@@ -149,10 +153,14 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		{
 			bReadyBroadcast = true;
 			RuntimeState = EEChartsRuntimeState::Ready;
+			FString PayloadJson = TEXT("{}");
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+			PayloadJson = InitializationPayloadForTesting;
+#endif
 			ExecuteJavascript(FEChartsWidgetJavascript::BuildRenderCommand(
 				CurrentTemplate,
 				InteractionMode,
-				TEXT("{}")));
+				PayloadJson));
 			OnChartReady.Broadcast();
 		}
 		return;
@@ -279,6 +287,14 @@ void UEChartsWidget::PrepareRebuildForTesting()
 void UEChartsWidget::SetForceWebGLUnavailableForTesting(const bool bForceUnavailable)
 {
 	bForceWebGLUnavailableForTesting = bForceUnavailable;
+}
+
+void UEChartsWidget::SetInitializationPayloadForTesting(
+	const FString& PayloadJson,
+	const bool bReportSeriesCount)
+{
+	InitializationPayloadForTesting = PayloadJson.IsEmpty() ? TEXT("{}") : PayloadJson;
+	bReportSeriesCountForTesting = bReportSeriesCount;
 }
 #endif
 
