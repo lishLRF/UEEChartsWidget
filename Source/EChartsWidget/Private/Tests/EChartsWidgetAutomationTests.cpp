@@ -45,6 +45,9 @@ namespace EChartsWidgetTests
 		int32 ExpectedReadyCount = 0;
 		uint64 ExpectedGeneration = 0;
 		bool bFailed = false;
+		FString ExpectedEffectiveTemplate;
+		int32 ExpectedRenderedCount = 0;
+		int32 ExpectedWarningCount = 0;
 
 		void Cleanup()
 		{
@@ -61,6 +64,101 @@ namespace EChartsWidgetTests
 				Sink = nullptr;
 			}
 		}
+	};
+
+	class FStartTemplateRenderCommand : public IAutomationLatentCommand
+	{
+	public:
+		FStartTemplateRenderCommand(
+			const TSharedRef<FBrowserIntegrationState>& InState,
+			FAutomationTestBase* InTest,
+			const EEChartsTemplate InTemplate,
+			const FString& InExpectedEffectiveTemplate,
+			const bool bInForceWebGLUnavailable)
+			: State(InState), Test(InTest), Template(InTemplate),
+			  ExpectedEffectiveTemplate(InExpectedEffectiveTemplate),
+			  bForceWebGLUnavailable(bInForceWebGLUnavailable)
+		{
+		}
+
+		virtual bool Update() override
+		{
+			if (State->bFailed) return true;
+			if (!State->Widget)
+			{
+				State->Widget = MakeWidget();
+				State->Sink = NewObject<UEChartsWidgetTestSink>();
+				State->Sink->AddToRoot();
+				State->Widget->OnChartReady.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleReady);
+				State->Widget->OnChartRendered.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleRendered);
+				State->Widget->OnEChartsWarning.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleWarning);
+				State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+				State->SlateWidget = State->Widget->TakeWidget();
+			}
+			State->Widget->SetForceWebGLUnavailableForTesting(bForceWebGLUnavailable);
+			State->Widget->InitializeECharts(Template, EEChartsInteractionMode::ClickOnly);
+			State->ExpectedEffectiveTemplate = ExpectedEffectiveTemplate;
+			++State->ExpectedRenderedCount;
+			if (bForceWebGLUnavailable &&
+				(Template == EEChartsTemplate::Bar3DHeightMap || Template == EEChartsTemplate::DataTableScatter3D))
+			{
+				++State->ExpectedWarningCount;
+			}
+			State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0;
+			return true;
+		}
+
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
+		EEChartsTemplate Template;
+		FString ExpectedEffectiveTemplate;
+		bool bForceWebGLUnavailable;
+	};
+
+	class FWaitForTemplateRenderCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitForTemplateRenderCommand(const TSharedRef<FBrowserIntegrationState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+
+		virtual bool Update() override
+		{
+			if (State->bFailed) return true;
+			if (State->Widget->RuntimeState == EEChartsRuntimeState::Error)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("CEF template render failed: %s"), *State->Widget->LastError));
+				return true;
+			}
+			if (State->Sink->RenderedCount >= State->ExpectedRenderedCount)
+			{
+				Test->TestEqual(TEXT("CEF emitted one rendered marker per requested template"), State->Sink->RenderedCount, State->ExpectedRenderedCount);
+				Test->TestEqual(TEXT("CEF rendered the expected WebGL or fallback template"), State->Widget->EffectiveTemplate, State->ExpectedEffectiveTemplate);
+				Test->TestEqual(TEXT("CEF emitted expected fallback warnings"), State->Sink->WarningCount, State->ExpectedWarningCount);
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("Timed out waiting for CEF rendered marker; URL: %s"), *State->Widget->GetUrl()));
+				return true;
+			}
+			return false;
+		}
+
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FFinishTemplateRenderCommand : public IAutomationLatentCommand
+	{
+	public:
+		explicit FFinishTemplateRenderCommand(const TSharedRef<FBrowserIntegrationState>& InState) : State(InState) {}
+		virtual bool Update() override { State->Cleanup(); return true; }
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
 	};
 
 	class FStartBrowserGenerationCommand : public IAutomationLatentCommand
@@ -294,16 +392,45 @@ bool FEChartsReflectionDefaultsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Default interaction"), Widget->InteractionMode, EEChartsInteractionMode::ClickOnly);
 	TestEqual(TEXT("Default runtime state"), Widget->RuntimeState, EEChartsRuntimeState::Uninitialized);
 	TestTrue(TEXT("Default last error is empty"), Widget->LastError.IsEmpty());
+	TestTrue(TEXT("Default last warning is empty"), Widget->LastWarning.IsEmpty());
+	TestTrue(TEXT("Default effective template is empty"), Widget->EffectiveTemplate.IsEmpty());
 
 	const FProperty* TemplateProperty = UEChartsWidget::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UEChartsWidget, CurrentTemplate));
 	const FProperty* InteractionProperty = UEChartsWidget::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UEChartsWidget, InteractionMode));
 	const FProperty* StateProperty = UEChartsWidget::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UEChartsWidget, RuntimeState));
 	const FProperty* ErrorProperty = UEChartsWidget::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UEChartsWidget, LastError));
+	const FProperty* WarningProperty = UEChartsWidget::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UEChartsWidget, LastWarning));
+	const FProperty* EffectiveTemplateProperty = UEChartsWidget::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UEChartsWidget, EffectiveTemplate));
 	TestTrue(TEXT("CurrentTemplate is Blueprint read-only"), TemplateProperty && TemplateProperty->HasAllPropertyFlags(CPF_BlueprintVisible | CPF_BlueprintReadOnly));
 	TestTrue(TEXT("InteractionMode is Blueprint read-only"), InteractionProperty && InteractionProperty->HasAllPropertyFlags(CPF_BlueprintVisible | CPF_BlueprintReadOnly));
 	TestTrue(TEXT("RuntimeState is Blueprint read-only"), StateProperty && StateProperty->HasAllPropertyFlags(CPF_BlueprintVisible | CPF_BlueprintReadOnly));
 	TestTrue(TEXT("LastError is Blueprint read-only"), ErrorProperty && ErrorProperty->HasAllPropertyFlags(CPF_BlueprintVisible | CPF_BlueprintReadOnly));
+	TestTrue(TEXT("LastWarning is Blueprint read-only"), WarningProperty && WarningProperty->HasAllPropertyFlags(CPF_BlueprintVisible | CPF_BlueprintReadOnly));
+	TestTrue(TEXT("EffectiveTemplate is Blueprint read-only"), EffectiveTemplateProperty && EffectiveTemplateProperty->HasAllPropertyFlags(CPF_BlueprintVisible | CPF_BlueprintReadOnly));
 	EChartsWidgetTests::DestroyWidget(Widget);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsJavascriptMappingTest,
+	"EChartsWidget.JavascriptMapping", EChartsWidgetTests::Flags)
+bool FEChartsJavascriptMappingTest::RunTest(const FString& Parameters)
+{
+	TestEqual(TEXT("SegmentedAreaLine mapping"), FEChartsWidgetJavascript::TemplateName(EEChartsTemplate::SegmentedAreaLine), FString(TEXT("SegmentedAreaLine")));
+	TestEqual(TEXT("Bar3DHeightMap mapping"), FEChartsWidgetJavascript::TemplateName(EEChartsTemplate::Bar3DHeightMap), FString(TEXT("Bar3DHeightMap")));
+	TestEqual(TEXT("DataTableScatter3D mapping"), FEChartsWidgetJavascript::TemplateName(EEChartsTemplate::DataTableScatter3D), FString(TEXT("DataTableScatter3D")));
+	TestEqual(TEXT("CustomOption mapping"), FEChartsWidgetJavascript::TemplateName(EEChartsTemplate::CustomOption), FString(TEXT("CustomOption")));
+	TestEqual(TEXT("Disabled mapping"), FEChartsWidgetJavascript::InteractionModeName(EEChartsInteractionMode::Disabled), FString(TEXT("Disabled")));
+	TestEqual(TEXT("ClickOnly mapping"), FEChartsWidgetJavascript::InteractionModeName(EEChartsInteractionMode::ClickOnly), FString(TEXT("ClickOnly")));
+	TestEqual(TEXT("FullHover mapping"), FEChartsWidgetJavascript::InteractionModeName(EEChartsInteractionMode::FullHover), FString(TEXT("FullHover")));
+
+	const FString Script = FEChartsWidgetJavascript::BuildRenderCommand(
+		EEChartsTemplate::DataTableScatter3D,
+		EEChartsInteractionMode::ClickOnly,
+		TEXT("{}"));
+	TestEqual(
+		TEXT("Render command uses the page-local minimal API"),
+		Script,
+		FString(TEXT("window.UEEChartsHost.renderTemplate(\"DataTableScatter3D\",{},\"ClickOnly\");")));
 	return true;
 }
 
@@ -332,6 +459,35 @@ bool FEChartsCEFLocalPageLifecycleTest::RunTest(const FString& Parameters)
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartBrowserErrorRecoveryCommand(State, this));
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForBrowserReadyCommand(State, this));
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FFinishBrowserIntegrationCommand(State, this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFTemplateRenderingTest,
+	"EChartsWidget.Integration.CEFTemplateRendering", EChartsWidgetTests::Flags)
+bool FEChartsCEFTemplateRenderingTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI")))
+	{
+		AddInfo(TEXT("Not executed under NullRHI: template rendering is covered by the required D3D12 run."));
+		return true;
+	}
+	if (!FSlateApplication::IsInitialized())
+	{
+		AddError(TEXT("Real CEF template rendering requires initialized Slate."));
+		return false;
+	}
+	const TSharedRef<EChartsWidgetTests::FBrowserIntegrationState> State = MakeShared<EChartsWidgetTests::FBrowserIntegrationState>();
+#define ADD_RENDER_CASE(TemplateValue, EffectiveName, ForceFallback) \
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartTemplateRenderCommand(State, this, TemplateValue, TEXT(EffectiveName), ForceFallback)); \
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForTemplateRenderCommand(State, this))
+	ADD_RENDER_CASE(EEChartsTemplate::SegmentedAreaLine, "SegmentedAreaLine", false);
+	ADD_RENDER_CASE(EEChartsTemplate::Bar3DHeightMap, "Bar3DHeightMap", false);
+	ADD_RENDER_CASE(EEChartsTemplate::DataTableScatter3D, "DataTableScatter3D", false);
+	ADD_RENDER_CASE(EEChartsTemplate::Bar3DHeightMap, "Bar3DHeightMap2D", true);
+	ADD_RENDER_CASE(EEChartsTemplate::DataTableScatter3D, "DataTableScatter2D", true);
+	ADD_RENDER_CASE(EEChartsTemplate::CustomOption, "CustomOption", false);
+#undef ADD_RENDER_CASE
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FFinishTemplateRenderCommand(State));
 	return true;
 }
 
@@ -392,6 +548,7 @@ bool FEChartsConsoleHandshakeTest::RunTest(const FString& Parameters)
 	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>();
 	Sink->AddToRoot();
 	Widget->OnChartReady.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleReady);
+	Widget->OnChartRendered.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleRendered);
 	Widget->OnEChartsWarning.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleWarning);
 	Widget->OnEChartsError.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleError);
 
@@ -400,10 +557,19 @@ bool FEChartsConsoleHandshakeTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Warning broadcasts once"), Sink->WarningCount, 1);
 	TestEqual(TEXT("Warning strips marker"), Sink->LastWarning, FString(TEXT("local fallback")));
 	TestEqual(TEXT("Warning does not change Loading"), Widget->RuntimeState, EEChartsRuntimeState::Loading);
+	TestEqual(TEXT("LastWarning retained"), Widget->LastWarning, FString(TEXT("local fallback")));
 
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), TEXT("chart-host.html"), 9);
 	TestEqual(TEXT("Ready broadcasts once"), Sink->ReadyCount, 1);
 	TestEqual(TEXT("Ready state"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_RENDERED__:0:SegmentedAreaLine:SegmentedAreaLine"), TEXT("chart-host.js"), 10);
+	TestEqual(TEXT("Stale rendered marker is ignored"), Sink->RenderedCount, 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_RENDERED__:1:SegmentedAreaLine:SegmentedAreaLine"), TEXT("chart-host.js"), 10);
+	TestEqual(TEXT("Rendered marker broadcasts once"), Sink->RenderedCount, 1);
+	TestEqual(TEXT("Rendered marker preserves requested template"), Sink->LastRequestedTemplate, EEChartsTemplate::SegmentedAreaLine);
+	TestEqual(TEXT("Rendered marker stores effective template"), Widget->EffectiveTemplate, FString(TEXT("SegmentedAreaLine")));
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_RENDERED__:1:Bar3DHeightMap:Bar3DHeightMap"), TEXT("chart-host.js"), 10);
+	TestEqual(TEXT("Mismatched requested template marker is ignored"), Sink->RenderedCount, 1);
 
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:1:bad option"), TEXT("chart-host.html"), 10);
 	TestEqual(TEXT("Error broadcasts once"), Sink->ErrorCount, 1);
@@ -421,15 +587,19 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCSPNoNetworkTest,
 bool FEChartsCSPNoNetworkTest::RunTest(const FString& Parameters)
 {
 	FString Html;
+	FString HostJavascript;
 	const FString HostPath = FEChartsWidgetResourceLocator::GetChartHostPath();
 	TestTrue(TEXT("Host page can be read"), FFileHelper::LoadFileToString(Html, *HostPath));
+	TestTrue(TEXT("External host runtime can be read"), FFileHelper::LoadFileToString(
+		HostJavascript,
+		*FPaths::Combine(FPaths::GetPath(HostPath), TEXT("chart-host.js"))));
 	TestTrue(TEXT("CSP defaults to local/data/blob"), Html.Contains(TEXT("default-src 'self' data: blob:")));
 	TestTrue(TEXT("CSP disables network connections"), Html.Contains(TEXT("connect-src 'none'")));
 	TestFalse(TEXT("No HTTP resources"), Html.Contains(TEXT("http://"), ESearchCase::IgnoreCase));
 	TestFalse(TEXT("No HTTPS resources"), Html.Contains(TEXT("https://"), ESearchCase::IgnoreCase));
 	TestFalse(TEXT("No protocol-relative resources"), Html.Contains(TEXT("src=\"//"), ESearchCase::IgnoreCase));
-	TestTrue(TEXT("Page emits ready marker"), Html.Contains(TEXT("__UE_ECHARTS_READY__")));
-	TestTrue(TEXT("Page reads the load generation query"), Html.Contains(TEXT("URLSearchParams")) && Html.Contains(TEXT("generation")));
+	TestTrue(TEXT("Page emits ready marker"), HostJavascript.Contains(TEXT("'READY'")) && HostJavascript.Contains(TEXT("__UE_ECHARTS_")));
+	TestTrue(TEXT("Page reads the load generation query"), HostJavascript.Contains(TEXT("URLSearchParams")) && HostJavascript.Contains(TEXT("generation")));
 	return true;
 }
 

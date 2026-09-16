@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "EChartsWidget.h"
 #include "UObject/Object.h"
 #include "EChartsWidgetTestSink.generated.h"
 
@@ -14,6 +15,14 @@ public:
 	void HandleReady()
 	{
 		++ReadyCount;
+	}
+
+	UFUNCTION()
+	void HandleRendered(EEChartsTemplate RequestedTemplate, const FString& InEffectiveTemplate)
+	{
+		++RenderedCount;
+		LastRequestedTemplate = RequestedTemplate;
+		LastEffectiveTemplate = InEffectiveTemplate;
 	}
 
 	UFUNCTION()
@@ -31,8 +40,11 @@ public:
 	}
 
 	int32 ReadyCount = 0;
+	int32 RenderedCount = 0;
 	int32 WarningCount = 0;
 	int32 ErrorCount = 0;
 	FString LastWarning;
 	FString LastError;
+	EEChartsTemplate LastRequestedTemplate = EEChartsTemplate::SegmentedAreaLine;
+	FString LastEffectiveTemplate;
 };

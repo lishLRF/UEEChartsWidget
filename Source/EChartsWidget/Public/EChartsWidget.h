@@ -37,6 +37,7 @@ class ECHARTSWIDGET_API UEChartsWidget : public UWebBrowser
 
 public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChartReady);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnChartRendered, EEChartsTemplate, RequestedTemplate, const FString&, EffectiveTemplate);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEChartsWarning, const FString&, Message);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEChartsError, const FString&, Message);
 
@@ -70,9 +71,21 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	FString LastError;
 
+	/** Current generation warning text, including any WebGL fallback reason. */
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
+	FString LastWarning;
+
+	/** Template that was actually rendered; may name a 2D WebGL fallback. */
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
+	FString EffectiveTemplate;
+
 	/** Broadcast once when the current generation reports Ready. */
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
 	FOnChartReady OnChartReady;
+
+	/** Broadcast once after ECharts accepts the current template option. */
+	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
+	FOnChartRendered OnChartRendered;
 
 	/** Broadcast for a warning emitted by the current non-terminal generation. */
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
@@ -91,6 +104,7 @@ public:
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	void RebindConsoleMessageForTesting();
 	void PrepareRebuildForTesting();
+	void SetForceWebGLUnavailableForTesting(bool bForceUnavailable);
 #endif
 
 protected:
@@ -106,8 +120,23 @@ private:
 
 	uint64 LoadGeneration = 0;
 	bool bReadyBroadcast = false;
+	bool bRenderedBroadcast = false;
 	bool bHasInitialized = false;
 	bool bReloadOnRebuild = false;
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+	bool bForceWebGLUnavailableForTesting = false;
+#endif
+};
+
+class ECHARTSWIDGET_API FEChartsWidgetJavascript
+{
+public:
+	static FString TemplateName(EEChartsTemplate Template);
+	static FString InteractionModeName(EEChartsInteractionMode InteractionMode);
+	static FString BuildRenderCommand(
+		EEChartsTemplate Template,
+		EEChartsInteractionMode InteractionMode,
+		const FString& PayloadJson);
 };
 
 class ECHARTSWIDGET_API FEChartsWidgetResourceLocator

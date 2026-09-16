@@ -1,0 +1,18 @@
+{
+  "packages": {
+    "echarts": {
+      "version": "6.1.0",
+      "license": "Apache-2.0",
+      "source": "https://registry.npmjs.org/echarts/-/echarts-6.1.0.tgz",
+      "file": "echarts.min.js",
+      "sha256": "b66b25aeb4df84e33199dc21694014d336d222cbd9deb0e5a7c14bd6aa0d0fd0"
+    },
+    "echarts-gl": {
+      "version": "2.1.0",
+      "license": "BSD-3-Clause",
+      "source": "https://registry.npmjs.org/echarts-gl/-/echarts-gl-2.1.0.tgz",
+      "file": "echarts-gl.min.js",
+      "sha256": "d6d60f2165ce3eb1ea360ef62e8490835e0ae2c1e0c1788a772fff918e350842"
+    }
+  }
+}

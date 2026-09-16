@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'nonce-echarts-host'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
   <style>
     html, body, #chart { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
   </style>
 </head>
 <body>
   <div id="chart"></div>
-  <script nonce="echarts-host">
-    const generation = new URLSearchParams(window.location.search).get('generation') || '0';
-    console.log('__UE_ECHARTS_READY__:' + generation);
-  </script>
+  <script src="vendor/echarts.min.js"></script>
+  <script src="vendor/echarts-gl.min.js"></script>
+  <script src="templates.js"></script>
+  <script src="chart-host.js"></script>
 </body>
 </html>

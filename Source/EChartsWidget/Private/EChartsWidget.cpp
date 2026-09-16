@@ -8,6 +8,7 @@
 namespace
 {
 	const FString ReadyMarker = TEXT("__UE_ECHARTS_READY__:");
+	const FString RenderedMarker = TEXT("__UE_ECHARTS_RENDERED__:");
 	const FString WarningMarker = TEXT("__UE_ECHARTS_WARNING__:");
 	const FString ErrorMarker = TEXT("__UE_ECHARTS_ERROR__:");
 
@@ -83,7 +84,10 @@ void UEChartsWidget::BeginLoadGeneration()
 {
 	RuntimeState = EEChartsRuntimeState::Loading;
 	LastError.Reset();
+	LastWarning.Reset();
+	EffectiveTemplate.Reset();
 	bReadyBroadcast = false;
+	bRenderedBroadcast = false;
 	if (++LoadGeneration == 0)
 	{
 		++LoadGeneration;
@@ -93,6 +97,12 @@ void UEChartsWidget::BeginLoadGeneration()
 		TEXT("%s?generation=%llu"),
 		*FEChartsWidgetResourceLocator::GetChartHostUrl(),
 		LoadGeneration);
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+	if (bForceWebGLUnavailableForTesting)
+	{
+		InitialURL += TEXT("&forceWebGL=0");
+	}
+#endif
 }
 
 void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
@@ -100,8 +110,11 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 	bReloadOnRebuild = bHasInitialized;
 	OnConsoleMessage.RemoveDynamic(this, &UEChartsWidget::HandleEChartsConsoleMessage);
 	bReadyBroadcast = false;
+	bRenderedBroadcast = false;
 	RuntimeState = EEChartsRuntimeState::Uninitialized;
 	LastError.Reset();
+	LastWarning.Reset();
+	EffectiveTemplate.Reset();
 	Super::ReleaseSlateResources(bReleaseChildren);
 }
 
@@ -136,7 +149,30 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		{
 			bReadyBroadcast = true;
 			RuntimeState = EEChartsRuntimeState::Ready;
+			ExecuteJavascript(FEChartsWidgetJavascript::BuildRenderCommand(
+				CurrentTemplate,
+				InteractionMode,
+				TEXT("{}")));
 			OnChartReady.Broadcast();
+		}
+		return;
+	}
+
+	if (Message.StartsWith(RenderedMarker))
+	{
+		TArray<FString> Parts;
+		Message.RightChop(RenderedMarker.Len()).ParseIntoArray(Parts, TEXT(":"), false);
+		uint64 MessageGeneration = 0;
+		if (Parts.Num() == 3 &&
+			TryParseGeneration(Parts[0], MessageGeneration) &&
+			MessageGeneration == LoadGeneration &&
+			Parts[1] == FEChartsWidgetJavascript::TemplateName(CurrentTemplate) &&
+			RuntimeState == EEChartsRuntimeState::Ready &&
+			!bRenderedBroadcast)
+		{
+			bRenderedBroadcast = true;
+			EffectiveTemplate = Parts[2];
+			OnChartRendered.Broadcast(CurrentTemplate, EffectiveTemplate);
 		}
 		return;
 	}
@@ -150,6 +186,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			MessageGeneration == LoadGeneration &&
 			RuntimeState != EEChartsRuntimeState::Error)
 		{
+			LastWarning = Warning;
 			OnEChartsWarning.Broadcast(Warning);
 		}
 		return;
@@ -169,6 +206,50 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			OnEChartsError.Broadcast(LastError);
 		}
 	}
+}
+
+FString FEChartsWidgetJavascript::TemplateName(const EEChartsTemplate Template)
+{
+	switch (Template)
+	{
+	case EEChartsTemplate::SegmentedAreaLine:
+		return TEXT("SegmentedAreaLine");
+	case EEChartsTemplate::Bar3DHeightMap:
+		return TEXT("Bar3DHeightMap");
+	case EEChartsTemplate::DataTableScatter3D:
+		return TEXT("DataTableScatter3D");
+	case EEChartsTemplate::CustomOption:
+		return TEXT("CustomOption");
+	default:
+		return TEXT("SegmentedAreaLine");
+	}
+}
+
+FString FEChartsWidgetJavascript::InteractionModeName(const EEChartsInteractionMode InteractionMode)
+{
+	switch (InteractionMode)
+	{
+	case EEChartsInteractionMode::Disabled:
+		return TEXT("Disabled");
+	case EEChartsInteractionMode::ClickOnly:
+		return TEXT("ClickOnly");
+	case EEChartsInteractionMode::FullHover:
+		return TEXT("FullHover");
+	default:
+		return TEXT("ClickOnly");
+	}
+}
+
+FString FEChartsWidgetJavascript::BuildRenderCommand(
+	const EEChartsTemplate Template,
+	const EEChartsInteractionMode InteractionMode,
+	const FString& PayloadJson)
+{
+	return FString::Printf(
+		TEXT("window.UEEChartsHost.renderTemplate(\"%s\",%s,\"%s\");"),
+		*TemplateName(Template),
+		PayloadJson.IsEmpty() ? TEXT("{}") : *PayloadJson,
+		*InteractionModeName(InteractionMode));
 }
 
 void UEChartsWidget::BindConsoleMessage()
@@ -193,6 +274,11 @@ void UEChartsWidget::PrepareRebuildForTesting()
 {
 	BindConsoleMessage();
 	PrepareAutomaticRebuild();
+}
+
+void UEChartsWidget::SetForceWebGLUnavailableForTesting(const bool bForceUnavailable)
+{
+	bForceWebGLUnavailableForTesting = bForceUnavailable;
 }
 #endif
 
