@@ -197,9 +197,12 @@ namespace EChartsDataTests
 				const FString DataCheck = bExpectHeatmap
 					? TEXT("JSON.stringify(s.data[0])===JSON.stringify([0,0,3])&&JSON.stringify(s.ueOriginalData[0])===JSON.stringify([10.5,200,3,4,5])")
 					: TEXT("JSON.stringify(s.data[0])===JSON.stringify([10.5,200,3,4,5])");
+				const bool bExpectBar3D = ExpectedType == TEXT("bar3D");
 				const FString CoordinateCheck = bExpectHeatmap
 					? TEXT("o.xAxis[0].type==='category'&&o.yAxis[0].type==='category'&&o.xAxis[0].data[0]===10.5&&o.yAxis[0].data[0]===200")
-					: (bExpect3D ? TEXT("hasGrid") : TEXT("!hasGrid&& !/3D$/.test(s.type)"));
+					: (bExpectBar3D
+						? TEXT("hasGrid&&o.xAxis3D[0].type==='value'&&o.yAxis3D[0].type==='value'&&o.zAxis3D[0].type==='value'&&window.UEEChartsHost.getSeriesCoordinateStatsForTesting([10.5,200,3]).allFinite")
+						: (bExpect3D ? TEXT("hasGrid") : TEXT("!hasGrid&& !/3D$/.test(s.type)")));
 				const FString GraphicCheck = bExpectHeatmap
 					? TEXT("(function(){var g=window.UEEChartsHost.getGraphicShapeStatsForTesting();return g.heatmapRectCount>0&&g.allFinite;}())")
 					: TEXT("true");
@@ -252,6 +255,283 @@ namespace EChartsDataTests
 			return false;
 		}
 
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FStartCacheReplayCommand : public IAutomationLatentCommand
+	{
+	public:
+		FStartCacheReplayCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+
+		virtual bool Update() override
+		{
+			State->Widget = MakeWidget();
+			State->Sink = NewObject<UEChartsWidgetTestSink>();
+			State->Sink->AddToRoot();
+			State->Widget->OnEChartsApplied.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleApplied);
+			State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+			State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
+			State->SlateWidget = State->Widget->TakeWidget();
+			TArray<FEChartsDataPoint2D> Data = {{10.0, 20.0}, {30.0, 40.0}};
+			State->Widget->SetSeriesData(0, Data);
+			State->Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+			State->Widget->ApplyEChartsChanges();
+			State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0;
+			return true;
+		}
+
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FWaitFirstApplyAndRebuildCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitFirstApplyAndRebuildCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (State->Sink->ErrorCount > 0)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("Initial cache apply failed: %s"), *State->Sink->LastError));
+				return true;
+			}
+			if (State->Sink->AppliedCount >= 1)
+			{
+				Test->TestEqual(TEXT("Initial cache revision"), State->Sink->LastAppliedRevision, int64(1));
+				State->SlateWidget.Reset();
+				State->Widget->ReleaseSlateResources(false);
+				State->SlateWidget = State->Widget->TakeWidget();
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0;
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(TEXT("Timed out waiting for initial cache APPLIED marker."));
+				return true;
+			}
+			return false;
+		}
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FWaitRebuildReplayAndProbeCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitRebuildReplayAndProbeCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (State->bFailed) return true;
+			if (State->Sink->ErrorCount > 0)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("Automatic rebuild replay failed: %s"), *State->Sink->LastError));
+				return true;
+			}
+			if (State->Sink->AppliedCount >= 2)
+			{
+				Test->TestEqual(TEXT("Rebuild replay keeps revision"), State->Sink->LastAppliedRevision, int64(1));
+				Test->TestEqual(TEXT("Rebuild replay keeps point count"), State->Sink->LastAppliedPointCount, 2);
+				State->Widget->ExecuteJavascript(TEXT(
+					"(function(){var o=window.UEEChartsHost.getOptionForTesting();var s=o.series[0];"
+					"var ok=s.type==='line'&&JSON.stringify(s.data)===JSON.stringify([[10,20],[30,40]]);"
+					"console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"));
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0;
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(TEXT("Timed out waiting for automatic rebuild replay APPLIED marker."));
+				return true;
+			}
+			return false;
+		}
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FWaitReplayProbeAndChangeTemplateCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitReplayProbeAndChangeTemplateCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (State->bFailed) return true;
+			if (State->Sink->DataOptionReportCount > 0)
+			{
+				Test->TestTrue(TEXT("Automatic rebuild getOption preserves cache"), State->Sink->bLastDataOptionSucceeded);
+				State->Sink->DataOptionReportCount = 0;
+				State->Sink->bLastDataOptionSucceeded = false;
+				State->Widget->InitializeECharts(EEChartsTemplate::DataTableScatter3D, EEChartsInteractionMode::ClickOnly);
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0;
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(TEXT("Timed out waiting for rebuild cache getOption probe."));
+				return true;
+			}
+			return false;
+		}
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FWaitTemplateReplayAndProbeCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitTemplateReplayAndProbeCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (State->bFailed) return true;
+			if (State->Sink->ErrorCount > 0)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("Template-change replay failed: %s"), *State->Sink->LastError));
+				return true;
+			}
+			if (State->Sink->AppliedCount >= 3)
+			{
+				Test->TestEqual(TEXT("Template replay keeps revision"), State->Sink->LastAppliedRevision, int64(1));
+				State->Widget->ExecuteJavascript(TEXT(
+					"(function(){var o=window.UEEChartsHost.getOptionForTesting();var s=o.series[0];"
+					"var ok=s.type==='scatter'&&JSON.stringify(s.data)===JSON.stringify([[10,20],[30,40]]);"
+					"console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"));
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0;
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(TEXT("Timed out waiting for template-change replay APPLIED marker."));
+				return true;
+			}
+			return false;
+		}
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FStartScatterTransitionCommand : public IAutomationLatentCommand
+	{
+	public:
+		FStartScatterTransitionCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			State->Widget = MakeWidget();
+			State->Sink = NewObject<UEChartsWidgetTestSink>();
+			State->Sink->AddToRoot();
+			State->Widget->OnEChartsApplied.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleApplied);
+			State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+			State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
+			State->Widget->SetForceWebGLUnavailableForTesting(true);
+			State->SlateWidget = State->Widget->TakeWidget();
+			TArray<FEChartsDataPoint2D> Data = {{10.0, 20.0}, {30.0, 40.0}};
+			State->Widget->SetSeriesData(0, Data);
+			State->Widget->InitializeECharts(EEChartsTemplate::DataTableScatter3D, EEChartsInteractionMode::ClickOnly);
+			State->Widget->ApplyEChartsChanges();
+			State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0;
+			return true;
+		}
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FAdvanceScatterTransitionCommand : public IAutomationLatentCommand
+	{
+	public:
+		FAdvanceScatterTransitionCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest, int32 InExpectedAppliedCount)
+			: State(InState), Test(InTest), ExpectedAppliedCount(InExpectedAppliedCount) {}
+		virtual bool Update() override
+		{
+			if (State->Sink->ErrorCount > 0)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("Scatter transition failed: %s"), *State->Sink->LastError));
+				return true;
+			}
+			if (State->Sink->AppliedCount >= ExpectedAppliedCount)
+			{
+				if (ExpectedAppliedCount == 1)
+				{
+					TArray<FEChartsDataPoint3D> Data3D = {{1.0, 2.0, 3.0, 4.0, 18.0}};
+					State->Widget->Set3DData(0, Data3D);
+				}
+				else
+				{
+					TArray<FEChartsDataPoint2D> Data = {{10.0, 20.0}, {30.0, 40.0}};
+					State->Widget->SetSeriesData(0, Data);
+				}
+				State->Widget->ApplyEChartsChanges();
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 20.0;
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(TEXT("Timed out advancing scatter type transition."));
+				return true;
+			}
+			return false;
+		}
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+		int32 ExpectedAppliedCount;
+	};
+
+	class FWaitScatterTransitionProbeCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitScatterTransitionProbeCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (State->bFailed) return true;
+			if (State->Sink->ErrorCount > 0)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(TEXT("Final scatter transition failed: %s"), *State->Sink->LastError));
+				return true;
+			}
+			if (State->Sink->AppliedCount >= 3)
+			{
+				State->Widget->ExecuteJavascript(TEXT(
+					"(function(){var o=window.UEEChartsHost.getOptionForTesting();var s=o.series[0];"
+					"var g=window.UEEChartsHost.getGraphicBoundsStatsForTesting();"
+					"var ex=Array.isArray(s.encode.x)?s.encode.x[0]:s.encode.x;var ey=Array.isArray(s.encode.y)?s.encode.y[0]:s.encode.y;"
+					"var ok=s.type==='scatter'&&typeof s.symbolSize!=='function'&&!s.dimensions&&!s.ueOriginalData&&"
+					"ex===0&&ey===1&&g.count>0&&g.allFinite&&g.hasNonZero;"
+					"console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"));
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0;
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(TEXT("Timed out waiting for final scatter transition APPLIED marker."));
+				return true;
+			}
+			return false;
+		}
 	private:
 		TSharedRef<FDataBrowserState> State;
 		FAutomationTestBase* Test;
@@ -450,6 +730,40 @@ bool FEChartsPayloadLimitsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Oversized decode leaves output empty"), Decoded.IsEmpty());
 	TestEqual(TEXT("Oversized encoded input never invokes Base64 decoder"),
 		FEChartsPayloadBuilder::GetDecodeAttemptCountForTesting(), 0);
+
+	Series = {};
+	Series[0].Type = EEChartsSeriesDataType::Data3D;
+	Series[0].Data3D.SetNum(FEChartsPayloadBuilder::MaxPointCount);
+	FEChartsPayloadBuilder::ResetSafetyInstrumentationForTesting();
+	const double ZeroBatchStart = FPlatformTime::Seconds();
+	TestTrue(TEXT("100k zero-valued 3D points fit the JSON limit"), FEChartsPayloadBuilder::BuildBase64Payload(
+		EEChartsTemplate::Bar3DHeightMap, EEChartsXAxisMode::ShowAll, Series, 2, Base64, PointCount, Error));
+	const double ZeroBatchSeconds = FPlatformTime::Seconds() - ZeroBatchStart;
+	TestEqual(TEXT("100k 3D point count is retained"), PointCount, FEChartsPayloadBuilder::MaxPointCount);
+	TestEqual(TEXT("Valid 100k batch reaches serializer once"),
+		FEChartsPayloadBuilder::GetSerializationAttemptCountForTesting(), 1);
+	TestTrue(TEXT("100k batch completes within a reasonable automation budget"), ZeroBatchSeconds < 10.0);
+	TestTrue(TEXT("100k batch Base64 decodes"), FEChartsPayloadBuilder::DecodeBase64Payload(Base64, Decoded, Error));
+	const FTCHARToUTF8 ZeroBatchUtf8(*Decoded);
+	TestTrue(TEXT("100k batch final UTF-8 JSON stays below 16 MiB"), ZeroBatchUtf8.Length() < FEChartsPayloadBuilder::MaxJsonBytes);
+	AddInfo(FString::Printf(TEXT("100k zero-valued 3D payload built in %.3f seconds (%d UTF-8 bytes)."),
+		ZeroBatchSeconds, ZeroBatchUtf8.Length()));
+
+	const double LargestFinite = TNumericLimits<double>::Max();
+	for (FEChartsDataPoint3D& Point : Series[0].Data3D)
+	{
+		Point = {LargestFinite, LargestFinite, LargestFinite, LargestFinite, LargestFinite};
+	}
+	Series[0].Name = FString::ChrN(800000, TCHAR(1));
+	Base64.Reset();
+	FEChartsPayloadBuilder::ResetSafetyInstrumentationForTesting();
+	TestFalse(TEXT("Actual worst-value JSON plus escaped name is rejected before allocation"),
+		FEChartsPayloadBuilder::BuildBase64Payload(
+			EEChartsTemplate::Bar3DHeightMap, EEChartsXAxisMode::ShowAll, Series, 3, Base64, PointCount, Error));
+	TestTrue(TEXT("Worst-value JSON byte limit error is clear"), Error.Contains(TEXT("16777216")));
+	TestTrue(TEXT("Rejected worst-value payload leaves Base64 empty"), Base64.IsEmpty());
+	TestEqual(TEXT("Rejected worst-value payload never reaches serializer"),
+		FEChartsPayloadBuilder::GetSerializationAttemptCountForTesting(), 0);
 	return true;
 }
 
@@ -477,6 +791,25 @@ bool FEChartsApplyRevisionStateTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Latest revision clears dirty state"), Widget->bIsDirty);
 	TestEqual(TEXT("Latest applied revision stored"), Widget->LastAppliedRevision, int64(2));
 	TestEqual(TEXT("Latest applied point count stored"), Widget->LastAppliedPointCount, 2);
+
+	Widget->InitializeECharts(EEChartsTemplate::DataTableScatter3D, EEChartsInteractionMode::ClickOnly);
+	TestTrue(TEXT("Explicit Initialize marks cached presentation for replay"), Widget->bIsDirty);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:2:2:2"), FString(), 0);
+	TestFalse(TEXT("Explicit Initialize replay acknowledges the unchanged revision"), Widget->bIsDirty);
+	TestEqual(TEXT("Replay does not increment data revision"), Widget->LastAppliedRevision, int64(2));
+
+	Widget->ClearAll();
+	Widget->ApplyEChartsChanges();
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:2:3:0"), FString(), 0);
+	TestFalse(TEXT("ClearAll empty presentation can be acknowledged"), Widget->bIsDirty);
+	Widget->ReleaseSlateResources(false);
+	Widget->PrepareRebuildForTesting();
+	TestTrue(TEXT("Automatic rebuild marks cleared presentation for replay"), Widget->bIsDirty);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:3:3:0"), FString(), 0);
+	TestFalse(TEXT("Automatic rebuild replays and acknowledges empty state"), Widget->bIsDirty);
+	TestEqual(TEXT("Empty replay keeps ClearAll revision"), Widget->LastAppliedRevision, int64(3));
 	EChartsDataTests::DestroyWidget(Widget);
 	return true;
 }
@@ -551,6 +884,43 @@ bool FEChartsCEF3DEffectiveTemplatesTest::RunTest(const FString& Parameters)
 	ADD_3D_CEF_CASE(EEChartsTemplate::Bar3DHeightMap, true, "heatmap");
 	ADD_3D_CEF_CASE(EEChartsTemplate::DataTableScatter3D, true, "scatter");
 #undef ADD_3D_CEF_CASE
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFCacheReplayTest,
+	"EChartsWidget.Integration.CEFCacheReplay", EChartsDataTests::Flags)
+bool FEChartsCEFCacheReplayTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI")))
+	{
+		AddInfo(TEXT("Not executed under NullRHI: real CEF cache replay requires D3D12."));
+		return true;
+	}
+	const TSharedRef<EChartsDataTests::FDataBrowserState> State = MakeShared<EChartsDataTests::FDataBrowserState>();
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FStartCacheReplayCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitFirstApplyAndRebuildCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitRebuildReplayAndProbeCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitReplayProbeAndChangeTemplateCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitTemplateReplayAndProbeCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitForDataProbeCommand(State, this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFScatterTransitionTest,
+	"EChartsWidget.Integration.CEFScatterTransition", EChartsDataTests::Flags)
+bool FEChartsCEFScatterTransitionTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI")))
+	{
+		AddInfo(TEXT("Not executed under NullRHI: real CEF scatter transitions require D3D12."));
+		return true;
+	}
+	const TSharedRef<EChartsDataTests::FDataBrowserState> State = MakeShared<EChartsDataTests::FDataBrowserState>();
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FStartScatterTransitionCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FAdvanceScatterTransitionCommand(State, this, 1));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FAdvanceScatterTransitionCommand(State, this, 2));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitScatterTransitionProbeCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FWaitForDataProbeCommand(State, this));
 	return true;
 }
 

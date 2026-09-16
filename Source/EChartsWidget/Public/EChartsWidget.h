@@ -203,6 +203,7 @@ private:
 	bool bRenderedBroadcast = false;
 	bool bHasInitialized = false;
 	bool bReloadOnRebuild = false;
+	bool bHasPresentationState = false;
 	TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> SeriesData;
 	int64 DataRevision = 0;
 	int64 InFlightRevision = 0;

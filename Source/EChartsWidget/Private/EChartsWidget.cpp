@@ -119,6 +119,7 @@ void UEChartsWidget::MarkDataChanged()
 		++DataRevision;
 	}
 	bIsDirty = true;
+	bHasPresentationState = true;
 	ScheduleAutoApply();
 }
 
@@ -455,6 +456,11 @@ void UEChartsWidget::BeginLoadGeneration()
 	{
 		bApplyRequested = true;
 		InFlightRevision = 0;
+	}
+	if (bHasPresentationState)
+	{
+		bIsDirty = true;
+		bApplyRequested = true;
 	}
 	RuntimeState = EEChartsRuntimeState::Loading;
 	LastError.Reset();

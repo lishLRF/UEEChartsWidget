@@ -27,6 +27,7 @@
     let resizeObserver = null;
     const webglAvailable = resolveWebGL();
     let currentEffectiveTemplate = null;
+    let templateBaseOption = null;
     let currentOption = null;
     let currentInteractionMode = 'ClickOnly';
 
@@ -91,8 +92,8 @@
     }
 
     function optionForPayload(payload) {
-      if (!currentOption || !currentEffectiveTemplate) throw new Error('Template must be rendered before applying data');
-      const option = clone(currentOption);
+      if (!templateBaseOption || !currentEffectiveTemplate) throw new Error('Template must be rendered before applying data');
+      const option = clone(templateBaseOption);
       const oldSeries = Array.isArray(option.series) ? option.series : (option.series ? [option.series] : []);
       const categoryLabels = [];
       const categoryLabelSet = new Set();
@@ -130,6 +131,13 @@
       option.series = payload.series.map(function (input, index) {
         const prototype = oldSeries[index] || oldSeries[0] || {};
         const output = Object.assign({}, clone(prototype), { name: input.name });
+        delete output.data;
+        delete output.dimensions;
+        delete output.encode;
+        delete output.ueOriginalData;
+        if (currentEffectiveTemplate !== 'CustomOption' && typeof output.symbolSize === 'function') {
+          delete output.symbolSize;
+        }
         if (input.type === 'category') {
           has2DSeries = true;
           const valuesByLabel = new Map();
@@ -196,6 +204,12 @@
         }
         if (!option.grid) option.grid = { left: 58, right: 24, top: 42, bottom: 44 };
       }
+      if (currentEffectiveTemplate === 'Bar3DHeightMap' &&
+          payload.series.some(function (series) { return series.type === 'data3D'; })) {
+        updateAxis(option, 'xAxis3D', { type: 'value', data: undefined });
+        updateAxis(option, 'yAxis3D', { type: 'value', data: undefined });
+        updateAxis(option, 'zAxis3D', { type: 'value', data: undefined });
+      }
       return window.UEEChartsTemplates.applyInteractionMode(option, currentInteractionMode);
     }
     function resizeChart() {
@@ -216,6 +230,7 @@
           chart.clear();
           chart.setOption(option, { notMerge: true, lazyUpdate: false });
           currentEffectiveTemplate = result.effectiveTemplate;
+          templateBaseOption = clone(option);
           currentOption = option;
           currentInteractionMode = interactionMode || 'ClickOnly';
           if (parameters.get('testSeriesProbe') === '1') {
@@ -260,6 +275,33 @@
             });
           })
         };
+      },
+      getGraphicBoundsStatsForTesting: function () {
+        const bounds = window.UEEChartsHost && chart
+          ? chart.getZr().storage.getDisplayList(true)
+            .filter(function (item) { return typeof item.getBoundingRect === 'function'; })
+            .map(function (item) { return item.getBoundingRect(); })
+          : [];
+        return {
+          count: bounds.length,
+          allFinite: bounds.every(function (box) {
+            return ['x', 'y', 'width', 'height'].every(function (field) { return Number.isFinite(box[field]); });
+          }),
+          hasNonZero: bounds.some(function (box) { return box.width > 0 && box.height > 0; })
+        };
+      },
+      getSeriesCoordinateStatsForTesting: function (value) {
+        try {
+          const seriesModel = chart.getModel().getSeriesByIndex(0);
+          const coordinateSystem = seriesModel && seriesModel.coordinateSystem;
+          if (!coordinateSystem || typeof coordinateSystem.dataToPoint !== 'function') {
+            return { allFinite: false, count: 0 };
+          }
+          const point = Array.from(coordinateSystem.dataToPoint(value));
+          return { allFinite: point.length > 0 && point.every(Number.isFinite), count: point.length };
+        } catch (_) {
+          return { allFinite: false, count: 0 };
+        }
       },
       resize: resizeChart,
       dispose: function () {

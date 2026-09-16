@@ -117,6 +117,17 @@ namespace
 		return true;
 	}
 
+	bool TryAccumulateFiniteDoubleBytes(const double Value, const int64 Limit, int64& InOutBytes)
+	{
+		if (!FMath::IsFinite(Value))
+		{
+			return false;
+		}
+		TCHAR Buffer[64];
+		const int32 Length = FCString::Snprintf(Buffer, UE_ARRAY_COUNT(Buffer), TEXT("%.17g"), Value);
+		return Length > 0 && Length < UE_ARRAY_COUNT(Buffer) && TryAddBytes(Length, Limit, InOutBytes);
+	}
+
 	bool PreflightPayload(
 		const TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount>& Series,
 		int32& OutPointCount,
@@ -146,28 +157,42 @@ namespace
 			case EEChartsSeriesDataType::Unset:
 				break;
 			case EEChartsSeriesDataType::Numeric2D:
-				if (!TryAddBytes(static_cast<int64>(Item.Numeric2D.Num()) * 72, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+				for (const FEChartsDataPoint2D& Point : Item.Numeric2D)
 				{
-					OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
-					return false;
+					if (!TryAddBytes(4, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAccumulateFiniteDoubleBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+					{
+						OutError = FString::Printf(TEXT("ECharts data contains non-finite values or exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
+						return false;
+					}
 				}
 				break;
 			case EEChartsSeriesDataType::Category:
 				for (const FEChartsCategoryDataPoint& Point : Item.Category)
 				{
 					if (!TryAccumulateJsonStringBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
-						!TryAddBytes(48, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+						!TryAddBytes(6, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
 					{
-						OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
+						OutError = FString::Printf(TEXT("ECharts data contains non-finite values or exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
 						return false;
 					}
 				}
 				break;
 			case EEChartsSeriesDataType::Data3D:
-				if (!TryAddBytes(static_cast<int64>(Item.Data3D.Num()) * 184, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+				for (const FEChartsDataPoint3D& Point : Item.Data3D)
 				{
-					OutError = FString::Printf(TEXT("ECharts data batch exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
-					return false;
+					if (!TryAddBytes(7, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAccumulateFiniteDoubleBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAccumulateFiniteDoubleBytes(Point.Z, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAccumulateFiniteDoubleBytes(Point.ColorValue, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
+						!TryAccumulateFiniteDoubleBytes(Point.SymbolSizeValue, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
+					{
+						OutError = FString::Printf(TEXT("ECharts data contains non-finite values or exceeds the %d byte JSON safety limit."), FEChartsPayloadBuilder::MaxJsonBytes);
+						return false;
+					}
 				}
 				break;
 			}

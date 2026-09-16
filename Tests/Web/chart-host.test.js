@@ -306,3 +306,96 @@ test('Bar3D height-map fallback produces finite heatmap rectangles for arbitrary
     chart.dispose();
   }
 });
+
+test('scatter fallback type transitions use a stable template baseline and keep finite nonzero graphics', () => {
+  const state = createHostContext();
+  let appliedOption = null;
+  state.window.location.search = '?generation=7&forceWebGL=0';
+  state.window.UEEChartsTemplates = templates;
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) { appliedOption = option; },
+    getOption() { return appliedOption || { series: [] }; },
+  });
+  vm.runInContext(hostSource, state.context);
+  assert.equal(state.window.UEEChartsHost.renderTemplate('DataTableScatter3D', {}, 'ClickOnly'), 'DataTableScatter2D');
+
+  const apply = (revision, type, data) => state.window.UEEChartsHost.applyDataBase64(encodePayload({
+    revision,
+    template: 'DataTableScatter3D',
+    xAxisMode: 'ShowAll',
+    series: [{ index: 0, name: 'S', type, data }],
+  }));
+  assert.equal(apply(1, 'numeric2D', [[10, 20], [30, 40]]), true);
+  assert.equal(apply(2, 'data3D', [[1, 2, 3, 4, 18]]), true);
+  assert.equal(apply(3, 'numeric2D', [[10, 20], [30, 40]]), true);
+
+  const chart = echarts.init(null, null, { renderer: 'svg', ssr: true, width: 320, height: 200 });
+  try {
+    chart.setOption(appliedOption);
+    const option = chart.getOption();
+    assert.notEqual(typeof option.series[0].symbolSize, 'function');
+    assert.equal(option.series[0].dimensions, undefined);
+    assert.equal(option.series[0].ueOriginalData, undefined);
+    assert.equal(Array.isArray(option.series[0].encode.x) ? option.series[0].encode.x[0] : option.series[0].encode.x, 0);
+    assert.equal(Array.isArray(option.series[0].encode.y) ? option.series[0].encode.y[0] : option.series[0].encode.y, 1);
+
+    const graphics = chart.getZr().storage.getDisplayList(true).filter((item) => typeof item.getBoundingRect === 'function');
+    const bounds = graphics.map((item) => item.getBoundingRect());
+    assert.ok(bounds.some((box) => Number.isFinite(box.width) && Number.isFinite(box.height) && box.width > 0 && box.height > 0));
+    assert.ok(bounds.every((box) => ['x', 'y', 'width', 'height'].every((field) => Number.isFinite(box[field]))));
+  } finally {
+    chart.dispose();
+  }
+});
+
+test('stable template cloning preserves CustomOption function fields', () => {
+  const state = createHostContext();
+  let appliedOption = null;
+  const formatter = function () { return 'kept'; };
+  state.window.UEEChartsTemplates.createTemplate = () => ({
+    requestedTemplate: 'CustomOption',
+    effectiveTemplate: 'CustomOption',
+    option: { tooltip: { formatter }, xAxis: {}, yAxis: {}, series: [{ type: 'line' }] },
+  });
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) { appliedOption = option; },
+    getOption() { return appliedOption || { series: [] }; },
+  });
+  vm.runInContext(hostSource, state.context);
+  state.window.UEEChartsHost.renderTemplate('CustomOption', {}, 'ClickOnly');
+  const payload = {
+    revision: 1,
+    template: 'CustomOption',
+    xAxisMode: 'ShowAll',
+    series: [{ index: 0, name: 'S', type: 'numeric2D', data: [[1, 2]] }],
+  };
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload(payload)), true);
+  assert.equal(appliedOption.tooltip.formatter, formatter);
+});
+
+test('native Bar3D data uses value axes for arbitrary XYZ coordinates', () => {
+  const state = createHostContext();
+  let appliedOption = null;
+  state.window.location.search = '?generation=7&forceWebGL=1';
+  state.window.UEEChartsTemplates = templates;
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) { appliedOption = option; },
+    getOption() { return appliedOption || { series: [] }; },
+  });
+  vm.runInContext(hostSource, state.context);
+  assert.equal(state.window.UEEChartsHost.renderTemplate('Bar3DHeightMap', {}, 'ClickOnly'), 'Bar3DHeightMap');
+  const payload = {
+    revision: 1,
+    template: 'Bar3DHeightMap',
+    xAxisMode: 'ShowAll',
+    series: [{ index: 0, name: '3D', type: 'data3D', data: [[10.5, 200, 3, 4, 5]] }],
+  };
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload(payload)), true);
+  assert.equal(appliedOption.series[0].type, 'bar3D');
+  assert.equal(appliedOption.xAxis3D.type, 'value');
+  assert.equal(appliedOption.yAxis3D.type, 'value');
+  assert.equal(appliedOption.zAxis3D.type, 'value');
+});
