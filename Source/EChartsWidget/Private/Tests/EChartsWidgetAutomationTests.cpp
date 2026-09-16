@@ -207,8 +207,8 @@ namespace EChartsWidgetTests
 			if (State->bFailed) return true;
 			if (State->Sink->ResizeReportCount > State->ResizeReportsBefore)
 			{
-				Test->TestTrue(TEXT("CEF ResizeObserver reported a positive width"), State->Sink->LastResizeWidth > 0);
-				Test->TestTrue(TEXT("CEF ResizeObserver reported a positive height"), State->Sink->LastResizeHeight > 0);
+				Test->TestEqual(TEXT("CEF ResizeObserver applied the requested width"), State->Sink->LastResizeWidth, 320);
+				Test->TestEqual(TEXT("CEF ResizeObserver applied the requested height"), State->Sink->LastResizeHeight, 200);
 				return true;
 			}
 			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
