@@ -73,6 +73,14 @@ void UEChartsWidget::InitializeECharts(
 	BindConsoleMessage();
 	CurrentTemplate = Template;
 	InteractionMode = InInteractionMode;
+	bHasInitialized = true;
+	bReloadOnRebuild = false;
+	BeginLoadGeneration();
+	LoadURL(InitialURL);
+}
+
+void UEChartsWidget::BeginLoadGeneration()
+{
 	RuntimeState = EEChartsRuntimeState::Loading;
 	LastError.Reset();
 	bReadyBroadcast = false;
@@ -85,11 +93,11 @@ void UEChartsWidget::InitializeECharts(
 		TEXT("%s?generation=%llu"),
 		*FEChartsWidgetResourceLocator::GetChartHostUrl(),
 		LoadGeneration);
-	LoadURL(InitialURL);
 }
 
 void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 {
+	bReloadOnRebuild = bHasInitialized;
 	OnConsoleMessage.RemoveDynamic(this, &UEChartsWidget::HandleEChartsConsoleMessage);
 	bReadyBroadcast = false;
 	RuntimeState = EEChartsRuntimeState::Uninitialized;
@@ -100,7 +108,17 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 TSharedRef<SWidget> UEChartsWidget::RebuildWidget()
 {
 	BindConsoleMessage();
+	PrepareAutomaticRebuild();
 	return Super::RebuildWidget();
+}
+
+void UEChartsWidget::PrepareAutomaticRebuild()
+{
+	if (bHasInitialized && bReloadOnRebuild)
+	{
+		bReloadOnRebuild = false;
+		BeginLoadGeneration();
+	}
 }
 
 void UEChartsWidget::HandleEChartsConsoleMessage(
@@ -169,6 +187,12 @@ const FText UEChartsWidget::GetPaletteCategory()
 void UEChartsWidget::RebindConsoleMessageForTesting()
 {
 	BindConsoleMessage();
+}
+
+void UEChartsWidget::PrepareRebuildForTesting()
+{
+	BindConsoleMessage();
+	PrepareAutomaticRebuild();
 }
 #endif
 

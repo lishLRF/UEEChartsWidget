@@ -44,9 +44,10 @@ public:
 
 	/**
 	 * Starts an asynchronous local-page load for a new generation.
-	 * Each call supersedes earlier loads; console events from older generations are ignored.
+	 * Each call supersedes earlier loads; an automatic Slate rebuild after release also starts a new generation.
+	 * Console events from older generations are ignored.
 	 * Chart commands issued before OnChartReady should be cached for the current generation.
-	 * Error is terminal for one generation, so call InitializeECharts again to recover.
+	 * Error is terminal for one generation; InitializeECharts or an automatic Slate rebuild starts recovery in a new generation.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ECharts")
 	void InitializeECharts(
@@ -61,7 +62,7 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	EEChartsInteractionMode InteractionMode = EEChartsInteractionMode::ClickOnly;
 
-	/** Current generation state. Error remains terminal until InitializeECharts starts a new generation. */
+	/** Current generation state. Error remains terminal until InitializeECharts or Slate rebuild starts a new generation. */
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	EEChartsRuntimeState RuntimeState = EEChartsRuntimeState::Uninitialized;
 
@@ -89,6 +90,7 @@ public:
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	void RebindConsoleMessageForTesting();
+	void PrepareRebuildForTesting();
 #endif
 
 protected:
@@ -99,9 +101,13 @@ private:
 	void HandleEChartsConsoleMessage(const FString& Message, const FString& Source, int32 Line);
 
 	void BindConsoleMessage();
+	void BeginLoadGeneration();
+	void PrepareAutomaticRebuild();
 
 	uint64 LoadGeneration = 0;
 	bool bReadyBroadcast = false;
+	bool bHasInitialized = false;
+	bool bReloadOnRebuild = false;
 };
 
 class ECHARTSWIDGET_API FEChartsWidgetResourceLocator

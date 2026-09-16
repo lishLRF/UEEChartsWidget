@@ -68,8 +68,10 @@ namespace EChartsWidgetTests
 	public:
 		FStartBrowserGenerationCommand(
 			const TSharedRef<FBrowserIntegrationState>& InState,
+			FAutomationTestBase* InTest,
 			const bool bInRebuild)
 			: State(InState)
+			, Test(InTest)
 			, bRebuild(bInRebuild)
 		{
 		}
@@ -89,14 +91,30 @@ namespace EChartsWidgetTests
 				State->Widget->OnChartReady.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleReady);
 				State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
 			}
-			else if (bRebuild)
+			if (bRebuild)
 			{
 				State->SlateWidget.Reset();
 				State->Widget->ReleaseSlateResources(false);
+				State->SlateWidget = State->Widget->TakeWidget();
+				const int32 ReadyCountBeforeStaleMarker = State->Sink->ReadyCount;
+				State->Widget->OnConsoleMessage.Broadcast(
+					FString::Printf(TEXT("__UE_ECHARTS_READY__:%llu"), State->ExpectedGeneration),
+					FString(),
+					0);
+				Test->TestEqual(
+					TEXT("Old CEF generation marker is ignored after automatic rebuild"),
+					State->Sink->ReadyCount,
+					ReadyCountBeforeStaleMarker);
+				Test->TestEqual(
+					TEXT("Automatic rebuild enters Loading for a new generation"),
+					State->Widget->RuntimeState,
+					EEChartsRuntimeState::Loading);
 			}
-
-			State->SlateWidget = State->Widget->TakeWidget();
-			State->Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+			else
+			{
+				State->SlateWidget = State->Widget->TakeWidget();
+				State->Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+			}
 			++State->ExpectedGeneration;
 			++State->ExpectedReadyCount;
 			State->DeadlineSeconds = FPlatformTime::Seconds() + 20.0;
@@ -105,7 +123,64 @@ namespace EChartsWidgetTests
 
 	private:
 		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
 		bool bRebuild;
+	};
+
+	class FStartBrowserErrorRecoveryCommand : public IAutomationLatentCommand
+	{
+	public:
+		FStartBrowserErrorRecoveryCommand(
+			const TSharedRef<FBrowserIntegrationState>& InState,
+			FAutomationTestBase* InTest)
+			: State(InState)
+			, Test(InTest)
+		{
+		}
+
+		virtual bool Update() override
+		{
+			if (State->bFailed)
+			{
+				return true;
+			}
+
+			Test->TestEqual(TEXT("Ready rebuild scenario emitted two Ready events"), State->Sink->ReadyCount, 2);
+			Test->TestEqual(TEXT("Ready rebuild scenario emitted no Error events"), State->Sink->ErrorCount, 0);
+			State->Cleanup();
+			State->ExpectedGeneration = 0;
+			State->ExpectedReadyCount = 0;
+
+			State->Widget = MakeWidget();
+			State->Sink = NewObject<UEChartsWidgetTestSink>();
+			State->Sink->AddToRoot();
+			State->Widget->OnChartReady.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleReady);
+			State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+			State->SlateWidget = State->Widget->TakeWidget();
+			State->Widget->InitializeECharts(EEChartsTemplate::CustomOption, EEChartsInteractionMode::FullHover);
+			State->Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:1:integration failure"), FString(), 0);
+			Test->TestEqual(TEXT("First error generation is terminal"), State->Widget->RuntimeState, EEChartsRuntimeState::Error);
+			Test->TestEqual(TEXT("First error generation broadcasts once"), State->Sink->ErrorCount, 1);
+
+			State->SlateWidget.Reset();
+			State->Widget->ReleaseSlateResources(false);
+			State->SlateWidget = State->Widget->TakeWidget();
+			Test->TestEqual(TEXT("Rebuild after Error enters Loading"), State->Widget->RuntimeState, EEChartsRuntimeState::Loading);
+			Test->TestTrue(TEXT("Rebuild after Error clears LastError"), State->Widget->LastError.IsEmpty());
+			State->Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+			State->Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:1:stale"), FString(), 0);
+			Test->TestEqual(TEXT("Stale error-generation Ready is ignored"), State->Sink->ReadyCount, 0);
+			Test->TestEqual(TEXT("Stale error-generation Error is ignored"), State->Sink->ErrorCount, 1);
+
+			State->ExpectedGeneration = 2;
+			State->ExpectedReadyCount = 1;
+			State->DeadlineSeconds = FPlatformTime::Seconds() + 20.0;
+			return true;
+		}
+
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
 	};
 
 	class FWaitForBrowserReadyCommand : public IAutomationLatentCommand
@@ -183,8 +258,8 @@ namespace EChartsWidgetTests
 		{
 			if (!State->bFailed)
 			{
-				Test->TestEqual(TEXT("Two CEF generations each emitted one Ready"), State->Sink->ReadyCount, 2);
-				Test->TestEqual(TEXT("CEF integration emitted no errors"), State->Sink->ErrorCount, 0);
+				Test->TestEqual(TEXT("Error rebuild generation emitted one Ready"), State->Sink->ReadyCount, 1);
+				Test->TestEqual(TEXT("Only the first error generation emitted Error"), State->Sink->ErrorCount, 1);
 			}
 			State->Cleanup();
 			return true;
@@ -250,9 +325,11 @@ bool FEChartsCEFLocalPageLifecycleTest::RunTest(const FString& Parameters)
 
 	const TSharedRef<EChartsWidgetTests::FBrowserIntegrationState> State =
 		MakeShared<EChartsWidgetTests::FBrowserIntegrationState>();
-	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartBrowserGenerationCommand(State, false));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartBrowserGenerationCommand(State, this, false));
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForBrowserReadyCommand(State, this));
-	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartBrowserGenerationCommand(State, true));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartBrowserGenerationCommand(State, this, true));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForBrowserReadyCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartBrowserErrorRecoveryCommand(State, this));
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForBrowserReadyCommand(State, this));
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FFinishBrowserIntegrationCommand(State, this));
 	return true;
@@ -441,6 +518,45 @@ bool FEChartsLifecycleNoDuplicateReadyTest::RunTest(const FString& Parameters)
 	Widget->InitializeECharts(EEChartsTemplate::CustomOption, EEChartsInteractionMode::Disabled);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
 	TestEqual(TEXT("Rebinding twice does not duplicate callbacks"), Sink->ReadyCount, 2);
+
+	Sink->RemoveFromRoot();
+	EChartsWidgetTests::DestroyWidget(Widget);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAutomaticRebuildGenerationTest,
+	"EChartsWidget.AutomaticRebuildGeneration", EChartsWidgetTests::Flags)
+bool FEChartsAutomaticRebuildGenerationTest::RunTest(const FString& Parameters)
+{
+	UEChartsWidget* Widget = EChartsWidgetTests::MakeWidget();
+	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>();
+	Sink->AddToRoot();
+	Widget->OnChartReady.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleReady);
+	Widget->OnEChartsError.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleError);
+
+	Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	TestEqual(TEXT("Initial generation becomes Ready once"), Sink->ReadyCount, 1);
+	Widget->ReleaseSlateResources(false);
+	Widget->PrepareRebuildForTesting();
+	TestEqual(TEXT("Automatic rebuild starts Loading"), Widget->RuntimeState, EEChartsRuntimeState::Loading);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	TestEqual(TEXT("Old Ready remains ignored after rebuild"), Sink->ReadyCount, 1);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	TestEqual(TEXT("Automatic rebuild generation broadcasts Ready once"), Sink->ReadyCount, 2);
+
+	Widget->InitializeECharts(EEChartsTemplate::CustomOption, EEChartsInteractionMode::FullHover);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:3:terminal"), FString(), 0);
+	TestEqual(TEXT("Current generation enters terminal Error"), Widget->RuntimeState, EEChartsRuntimeState::Error);
+	Widget->ReleaseSlateResources(false);
+	Widget->PrepareRebuildForTesting();
+	TestEqual(TEXT("Rebuild after Error starts a new Loading generation"), Widget->RuntimeState, EEChartsRuntimeState::Loading);
+	TestTrue(TEXT("Rebuild after Error clears LastError"), Widget->LastError.IsEmpty());
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
+	TestEqual(TEXT("Errored generation cannot recover after rebuild"), Sink->ReadyCount, 2);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:4"), FString(), 0);
+	TestEqual(TEXT("New rebuild generation can recover from prior Error"), Sink->ReadyCount, 3);
 
 	Sink->RemoveFromRoot();
 	EChartsWidgetTests::DestroyWidget(Widget);
