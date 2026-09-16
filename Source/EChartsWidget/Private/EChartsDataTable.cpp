@@ -43,6 +43,10 @@ void UEChartsWidget::LoadDataTable(int32 RowsPerFrame)
 		return;
 	}
 	DataTableSnapshot = MakeShared<FEChartsDataTableSnapshot>();
+	DataTableRequestTemplate = CurrentTemplate;
+	DataTablePreviousSeries = SeriesData[0];
+	DataTablePreviousAxis = XAxisMode;
+	bHasDataTableCacheSnapshot = true;
 	auto& S = *DataTableSnapshot;
 	S.RowNames = MappedDataTable->GetRowNames();
 	S.Mapping = DataTableMapping;
@@ -65,7 +69,7 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 	auto S = DataTableSnapshot;
 	if (CurrentTemplate != S->Template)
 	{
-		FailDataTableLoad(TEXT("Chart template changed during the DataTable snapshot; load again."));
+		CancelDataTableLoad();
 		return false;
 	}
 	FString Error;
@@ -93,7 +97,7 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 		return false;
 	if (CurrentTemplate != S->Template)
 	{
-		FailDataTableLoad(TEXT("Chart template changed in the DataTable progress callback; load again."));
+		CancelDataTableLoad();
 		return false;
 	}
 	if (RowsSucceeded > FEChartsPayloadBuilder::MaxPointCount)
@@ -143,10 +147,15 @@ void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 				W->FailDataTableLoad(Error);
 				return;
 			}
-			if (W->DataRevision != BaseRevision || W->CurrentTemplate != Template)
+			if (W->CurrentTemplate != Template)
+			{
+				W->CancelDataTableLoad();
+				return;
+			}
+			if (W->DataRevision != BaseRevision)
 			{
 				W->FailDataTableLoad(
-				    TEXT("Chart data or template changed while processing the DataTable; load again."));
+				    TEXT("Chart data changed while processing the DataTable; load again."));
 				return;
 			}
 			if (W->RuntimeState == EEChartsRuntimeState::Error)
@@ -154,8 +163,6 @@ void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 				W->FailDataTableLoad(W->LastError);
 				return;
 			}
-			W->DataTablePreviousSeries = W->SeriesData[0];
-			W->DataTablePreviousAxis = W->XAxisMode;
 			W->bInstallingDataTable = true;
 			bool bSet = false;
 			switch (Result.Type)
@@ -198,16 +205,23 @@ void UEChartsWidget::StopDataTableLoad(bool bNotify)
 	const bool bActive = DataTableLoadState == EEChartsDataTableLoadState::Reading ||
 	                     DataTableLoadState == EEChartsDataTableLoadState::Processing ||
 	                     DataTableLoadState == EEChartsDataTableLoadState::Applying;
-	if (DataTableLoadState == EEChartsDataTableLoadState::Applying && DataTableApplyRevision == DataRevision)
+	if (bActive && InFlightRevision == DataTableApplyRevision)
+		InFlightRevision = 0;
+	if (bActive && bHasDataTableCacheSnapshot &&
+		(bNotify || (DataTableLoadState == EEChartsDataTableLoadState::Applying && DataTableApplyRevision == DataRevision)))
 	{
 		SeriesData[0] = MoveTemp(DataTablePreviousSeries);
 		XAxisMode = DataTablePreviousAxis;
 		bInstallingDataTable = true;
 		MarkDataChanged();
 		bInstallingDataTable = false;
+	}
+	if (bActive)
+	{
 		bApplyRequested = false;
 		CancelAutoApply();
 	}
+	bHasDataTableCacheSnapshot = false;
 	DataTableApplyRevision = 0;
 	DataTablePayloadBase64.Reset();
 	DataTablePreviousSeries = {};

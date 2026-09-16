@@ -478,8 +478,8 @@ bool FEChartsDataTableRowNameTest::RunTest(const FString& Parameters)
 	Widget->LoadDataTable(1);
 	Widget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap);
 	FTSTicker::GetCoreTicker().Tick(0.01f);
-	TestEqual(TEXT("Changed template fails before reading incompatible rows"), Widget->DataTableLoadState,
-	    EEChartsDataTableLoadState::Error);
+	TestEqual(TEXT("Changed template cancels before reading incompatible rows"), Widget->DataTableLoadState,
+	    EEChartsDataTableLoadState::Cancelled);
 	TestEqual(TEXT("Changed template did not scan"), Widget->RowsProcessed, 0);
 	Widget->InitializeECharts();
 	Widget->SetDataTableMapping(Table, S.Mapping);
@@ -488,7 +488,7 @@ bool FEChartsDataTableRowNameTest::RunTest(const FString& Parameters)
 	Widget->OnDataTableLoadProgress.AddDynamic(Sink.Get(), &UEChartsWidgetTestSink::HandleTableProgress);
 	Widget->LoadDataTable(4096);
 	FTSTicker::GetCoreTicker().Tick(0.01f);
-	TestEqual(TEXT("Final progress callback changing template cannot dispatch incompatible worker"), Widget->DataTableLoadState, EEChartsDataTableLoadState::Error);
+	TestEqual(TEXT("Final progress callback changing template cannot dispatch incompatible worker"), Widget->DataTableLoadState, EEChartsDataTableLoadState::Cancelled);
 	Widget->ReleaseSlateResources(false);
 	return true;
 }
@@ -510,6 +510,142 @@ bool FEChartsConcurrentPayloadTest::RunTest(const FString& Parameters)
 	});
 	TestEqual(TEXT("Concurrent serializers retain every instrumentation increment"),
 	    FEChartsPayloadBuilder::GetSerializationAttemptCountForTesting(), 4096);
+	return true;
+}
+class FEChartsTemplateCancellationCommand : public IAutomationLatentCommand
+{
+	FAutomationTestBase* Test;
+	bool bRealCEF;
+	bool bDispatch;
+	int32 Stage = 0;
+	double Start = 0;
+	TStrongObjectPtr<UEChartsWidget> Widget;
+	TStrongObjectPtr<UDataTable> Table;
+	TStrongObjectPtr<UEChartsWidgetTestSink> Sink;
+	TSharedPtr<SWidget> Slate;
+	void Cleanup() { Slate.Reset(); Widget->ReleaseSlateResources(false); }
+	void Start3DLoad()
+	{
+		FEChartsDataTableMapping Mapping;
+		Mapping.X = TEXT("X"); Mapping.Y = TEXT("Y"); Mapping.Z = TEXT("Z");
+		Test->TestTrue(TEXT("Fresh 3D mapping validates"), Widget->SetDataTableMapping(Table.Get(), Mapping));
+		Widget->LoadDataTable(1);
+		Stage = 3;
+	}
+public:
+	FEChartsTemplateCancellationCommand(FAutomationTestBase* T, bool bCEF, bool bInDispatch)
+		: Test(T), bRealCEF(bCEF), bDispatch(bInDispatch) {}
+	virtual bool Update() override
+	{
+		if (Stage == 0)
+		{
+			Start = FPlatformTime::Seconds();
+			Widget.Reset(NewObject<UEChartsWidget>());
+			Sink.Reset(NewObject<UEChartsWidgetTestSink>());
+			Widget->OnConsoleMessage.AddDynamic(Sink.Get(), &UEChartsWidgetTestSink::HandleConsoleMessage);
+			Widget->OnDataTableLoaded.AddDynamic(Sink.Get(), &UEChartsWidgetTestSink::HandleTableLoaded);
+			Widget->OnDataTableLoadCancelled.AddDynamic(Sink.Get(), &UEChartsWidgetTestSink::HandleTableCancelled);
+			Widget->Set3DData(0, {{8, 9, 10, 10, 12}});
+			Widget->SetXAxisMode(EEChartsXAxisMode::ShowAll);
+			Widget->InitializeECharts();
+			Table.Reset(NewObject<UDataTable>()); Table->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+			FEChartsDataTableTestRow Row; Row.X = 1; Row.Y = 2; Table->AddRow(TEXT("A"), Row);
+			FEChartsDataTableMapping Mapping; Mapping.X = TEXT("Category"); Mapping.Y = TEXT("Y");
+			Widget->SetDataTableMapping(Table.Get(), Mapping); Widget->LoadDataTable(1);
+			Stage = 1; return false;
+		}
+		if (FPlatformTime::Seconds() - Start > 20)
+		{
+			Test->AddError(TEXT("Template cancellation/reload timed out")); Cleanup(); return true;
+		}
+		if (Stage == 1 && Widget->DataTableLoadState == EEChartsDataTableLoadState::Applying)
+		{
+			Test->TestEqual(TEXT("Pending category snapshot installed"), Widget->GetCategorySeriesData(0).Num(), 1);
+			if (bDispatch) Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+			Widget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap);
+			Test->TestEqual(TEXT("Template switch cancels active snapshot"), Widget->DataTableLoadState, EEChartsDataTableLoadState::Cancelled);
+			Test->TestEqual(TEXT("Cancelled event fires once"), Sink->TableCancelledCount, 1);
+			Test->TestEqual(TEXT("Loading-time Series0 restored"), Widget->Get3DData(0).Num(), 1);
+			Test->TestEqual(TEXT("Loading-time axis restored"), Widget->XAxisMode, EEChartsXAxisMode::ShowAll);
+			Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:1:4:1"), FString(), 0);
+			Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:2:4:1"), FString(), 0);
+			Test->TestEqual(TEXT("Old ACK cannot finish cancelled request"), Sink->TableLoadedCount, 0);
+			Test->TestEqual(TEXT("Old ACK ignored"), Widget->LastAppliedRevision, int64(0));
+			if (bRealCEF) { Slate = Widget->TakeWidget(); Stage = 2; }
+			else
+			{
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:2:5:1"), FString(), 0);
+				Test->TestEqual(TEXT("Restored cache ACK does not complete cancelled load"), Sink->TableLoadedCount, 0);
+				Start3DLoad();
+			}
+			return false;
+		}
+		if (Stage == 2 && Widget->LastAppliedRevision > 0)
+		{
+			Test->TestEqual(TEXT("CEF replay leaves cancelled state"), Widget->DataTableLoadState, EEChartsDataTableLoadState::Cancelled);
+			Test->TestEqual(TEXT("CEF replay does not emit Loaded"), Sink->TableLoadedCount, 0);
+			Widget->ExecuteJavascript(TEXT("(function(){var o=window.UEEChartsHost.getOptionForTesting();var ok=o.series[0].type==='bar3D'&&JSON.stringify(o.series[0].data)==='[[8,9,10,10,12]]';console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"));
+			Stage = 4; return false;
+		}
+		if (Stage == 4 && Sink->DataOptionReportCount > 0)
+		{
+			Test->TestTrue(TEXT("3D page receives restored cache, never old category payload"), Sink->bLastDataOptionSucceeded);
+			Start3DLoad(); return false;
+		}
+		if (Stage == 3)
+		{
+			if (!bRealCEF && Widget->DataTableLoadState == EEChartsDataTableLoadState::Applying)
+			{
+				Widget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap);
+				Test->TestEqual(TEXT("Same template keeps the active request"), Widget->DataTableLoadState, EEChartsDataTableLoadState::Applying);
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:2:7:1"), FString(), 0);
+				Test->TestEqual(TEXT("Superseded browser ACK cannot complete same-template reload"), Sink->TableLoadedCount, 0);
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:3:7:1"), FString(), 0);
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:3:7:1"), FString(), 0);
+			}
+			if (Widget->DataTableLoadState == EEChartsDataTableLoadState::Completed)
+			{
+				Test->TestEqual(TEXT("Only fresh 3D load completes"), Sink->TableLoadedCount, 1);
+				Test->TestEqual(TEXT("New 3D snapshot installed"), Widget->Get3DData(0).Num(), 1);
+				Cleanup(); return true;
+			}
+		}
+		return false;
+	}
+};
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsTemplateCancellationTest, "EChartsWidget.DataTable.TemplateCancellation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsTemplateCancellationTest::RunTest(const FString& Parameters)
+{
+	for (bool bProcessing : {false, true})
+	{
+		TStrongObjectPtr<UEChartsWidget> W(NewObject<UEChartsWidget>());
+		TStrongObjectPtr<UEChartsWidgetTestSink> S(NewObject<UEChartsWidgetTestSink>());
+		W->OnDataTableLoadCancelled.AddDynamic(S.Get(), &UEChartsWidgetTestSink::HandleTableCancelled);
+		W->Set3DData(0, {{8, 9, 10, 10, 12}});
+		UDataTable* T = NewObject<UDataTable>(); T->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+		T->AddRow(TEXT("A"), FEChartsDataTableTestRow());
+		FEChartsDataTableMapping M; M.X=TEXT("Category"); M.Y=TEXT("Y");
+		W->SetDataTableMapping(T, M); W->LoadDataTable();
+		if (bProcessing) FTSTicker::GetCoreTicker().Tick(0.01f);
+		W->InitializeECharts(EEChartsTemplate::Bar3DHeightMap);
+		TestEqual(TEXT("Reading/Processing template change cancels immediately"), W->DataTableLoadState, EEChartsDataTableLoadState::Cancelled);
+		TestEqual(TEXT("Reading/Processing cancellation event"), S->TableCancelledCount, 1);
+		TestEqual(TEXT("Reading/Processing restores original Series0"), W->Get3DData(0).Num(), 1);
+		W->ReleaseSlateResources(false);
+	}
+	ADD_LATENT_AUTOMATION_COMMAND(FEChartsTemplateCancellationCommand(this, false, false));
+	ADD_LATENT_AUTOMATION_COMMAND(FEChartsTemplateCancellationCommand(this, false, true));
+	return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFTemplateCancellationTest, "EChartsWidget.Integration.CEFDataTableTemplateCancellation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsCEFTemplateCancellationTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI"))) return true;
+	ADD_LATENT_AUTOMATION_COMMAND(FEChartsTemplateCancellationCommand(this, true, false));
 	return true;
 }
 #endif

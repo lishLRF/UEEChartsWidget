@@ -233,6 +233,8 @@ private:
 	FString DataTablePayloadBase64;
 	FEChartsSeriesData DataTablePreviousSeries;
 	EEChartsXAxisMode DataTablePreviousAxis = EEChartsXAxisMode::ShowAll;
+	EEChartsTemplate DataTableRequestTemplate = EEChartsTemplate::SegmentedAreaLine;
+	bool bHasDataTableCacheSnapshot = false;
 	bool bInstallingDataTable = false;
 
 	uint64 LoadGeneration = 0;

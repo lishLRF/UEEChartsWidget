@@ -111,6 +111,7 @@ void UEChartsWidget::MarkDataChanged()
 	if (!bInstallingDataTable && DataTableLoadState == EEChartsDataTableLoadState::Applying)
 	{
 		DataTableApplyRevision = 0;
+		bHasDataTableCacheSnapshot = false;
 		StopDataTableLoad(false);
 	}
 	static constexpr int64 MaxJavascriptSafeInteger = 9007199254740991LL;
@@ -450,6 +451,13 @@ void UEChartsWidget::InitializeECharts(
 	const EEChartsTemplate Template,
 	const EEChartsInteractionMode InInteractionMode)
 {
+	if (Template != DataTableRequestTemplate &&
+		(DataTableLoadState == EEChartsDataTableLoadState::Reading ||
+		 DataTableLoadState == EEChartsDataTableLoadState::Processing ||
+		 DataTableLoadState == EEChartsDataTableLoadState::Applying))
+	{
+		CancelDataTableLoad();
+	}
 	BindConsoleMessage();
 	CurrentTemplate = Template;
 	InteractionMode = InInteractionMode;
@@ -604,6 +612,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				DataTableApplyRevision = 0;
 				DataTablePayloadBase64.Reset();
 				DataTablePreviousSeries = {};
+				bHasDataTableCacheSnapshot = false;
 				OnDataTableLoaded.Broadcast(RowsSucceeded, RowsSkipped);
 			}
 			if (bApplyRequested && bIsDirty)
