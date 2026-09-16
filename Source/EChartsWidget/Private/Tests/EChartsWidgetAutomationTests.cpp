@@ -4,11 +4,17 @@
 #include "EChartsWidgetTestSink.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
 #include "WebBrowser.h"
+#include "Framework/Application/SlateApplication.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
+#include "HAL/PlatformTime.h"
+#include "Interfaces/IPluginManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Parse.h"
 #include "UObject/UnrealType.h"
+#include "Widgets/SWidget.h"
 
 namespace EChartsWidgetTests
 {
@@ -29,6 +35,165 @@ namespace EChartsWidgetTests
 		Widget->ReleaseSlateResources(false);
 		Widget->RemoveFromRoot();
 	}
+
+	struct FBrowserIntegrationState
+	{
+		UEChartsWidget* Widget = nullptr;
+		UEChartsWidgetTestSink* Sink = nullptr;
+		TSharedPtr<SWidget> SlateWidget;
+		double DeadlineSeconds = 0.0;
+		int32 ExpectedReadyCount = 0;
+		uint64 ExpectedGeneration = 0;
+		bool bFailed = false;
+
+		void Cleanup()
+		{
+			SlateWidget.Reset();
+			if (Widget)
+			{
+				Widget->ReleaseSlateResources(false);
+				Widget->RemoveFromRoot();
+				Widget = nullptr;
+			}
+			if (Sink)
+			{
+				Sink->RemoveFromRoot();
+				Sink = nullptr;
+			}
+		}
+	};
+
+	class FStartBrowserGenerationCommand : public IAutomationLatentCommand
+	{
+	public:
+		FStartBrowserGenerationCommand(
+			const TSharedRef<FBrowserIntegrationState>& InState,
+			const bool bInRebuild)
+			: State(InState)
+			, bRebuild(bInRebuild)
+		{
+		}
+
+		virtual bool Update() override
+		{
+			if (State->bFailed)
+			{
+				return true;
+			}
+
+			if (!State->Widget)
+			{
+				State->Widget = MakeWidget();
+				State->Sink = NewObject<UEChartsWidgetTestSink>();
+				State->Sink->AddToRoot();
+				State->Widget->OnChartReady.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleReady);
+				State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+			}
+			else if (bRebuild)
+			{
+				State->SlateWidget.Reset();
+				State->Widget->ReleaseSlateResources(false);
+			}
+
+			State->SlateWidget = State->Widget->TakeWidget();
+			State->Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+			++State->ExpectedGeneration;
+			++State->ExpectedReadyCount;
+			State->DeadlineSeconds = FPlatformTime::Seconds() + 20.0;
+			return true;
+		}
+
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		bool bRebuild;
+	};
+
+	class FWaitForBrowserReadyCommand : public IAutomationLatentCommand
+	{
+	public:
+		FWaitForBrowserReadyCommand(
+			const TSharedRef<FBrowserIntegrationState>& InState,
+			FAutomationTestBase* InTest)
+			: State(InState)
+			, Test(InTest)
+		{
+		}
+
+		virtual bool Update() override
+		{
+			if (State->bFailed)
+			{
+				return true;
+			}
+
+			if (State->Widget->RuntimeState == EEChartsRuntimeState::Error)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(
+					TEXT("CEF page generation %llu reported Error: %s"),
+					State->ExpectedGeneration,
+					*State->Widget->LastError));
+				return true;
+			}
+
+			if (State->Widget->RuntimeState == EEChartsRuntimeState::Ready)
+			{
+				Test->TestEqual(
+					TEXT("CEF Ready broadcasts exactly once per generation"),
+					State->Sink->ReadyCount,
+					State->ExpectedReadyCount);
+				const FString LoadedUrl = State->Widget->GetUrl();
+				Test->TestTrue(TEXT("CEF loaded the local file URL"), LoadedUrl.StartsWith(TEXT("file:///")));
+				Test->TestTrue(
+					TEXT("CEF loaded the expected generation query"),
+					LoadedUrl.Contains(FString::Printf(TEXT("generation=%llu"), State->ExpectedGeneration)));
+				return true;
+			}
+
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				State->bFailed = true;
+				Test->AddError(FString::Printf(
+					TEXT("Timed out waiting for real CEF Ready for generation %llu; current URL: %s"),
+					State->ExpectedGeneration,
+					*State->Widget->GetUrl()));
+				return true;
+			}
+
+			return false;
+		}
+
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
+	};
+
+	class FFinishBrowserIntegrationCommand : public IAutomationLatentCommand
+	{
+	public:
+		FFinishBrowserIntegrationCommand(
+			const TSharedRef<FBrowserIntegrationState>& InState,
+			FAutomationTestBase* InTest)
+			: State(InState)
+			, Test(InTest)
+		{
+		}
+
+		virtual bool Update() override
+		{
+			if (!State->bFailed)
+			{
+				Test->TestEqual(TEXT("Two CEF generations each emitted one Ready"), State->Sink->ReadyCount, 2);
+				Test->TestEqual(TEXT("CEF integration emitted no errors"), State->Sink->ErrorCount, 0);
+			}
+			State->Cleanup();
+			return true;
+		}
+
+	private:
+		TSharedRef<FBrowserIntegrationState> State;
+		FAutomationTestBase* Test;
+	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsReflectionDefaultsTest,
@@ -67,6 +232,32 @@ bool FEChartsReflectionDefaultsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFLocalPageLifecycleTest,
+	"EChartsWidget.Integration.CEFLocalPageLifecycle", EChartsWidgetTests::Flags)
+bool FEChartsCEFLocalPageLifecycleTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI")))
+	{
+		AddInfo(TEXT("Not executed under NullRHI: real CEF page loading requires a rendered Slate browser. Run this test with -d3d12; the D3D12 run is required by verification."));
+		return true;
+	}
+
+	if (!FSlateApplication::IsInitialized())
+	{
+		AddError(TEXT("Real CEF integration requires an initialized Slate application."));
+		return false;
+	}
+
+	const TSharedRef<EChartsWidgetTests::FBrowserIntegrationState> State =
+		MakeShared<EChartsWidgetTests::FBrowserIntegrationState>();
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartBrowserGenerationCommand(State, false));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForBrowserReadyCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FStartBrowserGenerationCommand(State, true));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FWaitForBrowserReadyCommand(State, this));
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsWidgetTests::FFinishBrowserIntegrationCommand(State, this));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsLocalResourceUrlTest,
 	"EChartsWidget.LocalResourceUrl", EChartsWidgetTests::Flags)
 bool FEChartsLocalResourceUrlTest::RunTest(const FString& Parameters)
@@ -87,7 +278,7 @@ bool FEChartsLocalResourceUrlTest::RunTest(const FString& Parameters)
 	FString SyntheticAbsolutePath = FPaths::ConvertRelativePathToFull(FPaths::Combine(
 		FPlatformMisc::RootDir(),
 		TEXT("ECharts URL Tests"),
-		TEXT("space # percent% Unicode-数据"),
+		TEXT("space # percent% Unicode-数据-Emoji-😀-𠮷"),
 		TEXT("chart-host.html")));
 	FPaths::NormalizeFilename(SyntheticAbsolutePath);
 	const FString SyntheticUrl = FEChartsWidgetResourceLocator::BuildHostPageUrlForPath(SyntheticAbsolutePath);
@@ -100,6 +291,8 @@ bool FEChartsLocalResourceUrlTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Hash is percent encoded"), SyntheticUrl.Contains(TEXT("%23")));
 	TestTrue(TEXT("Percent is percent encoded"), SyntheticUrl.Contains(TEXT("%25")));
 	TestFalse(TEXT("Unicode is UTF-8 percent encoded"), SyntheticUrl.Contains(TEXT("数据")));
+	TestFalse(TEXT("Emoji is UTF-8 percent encoded"), SyntheticUrl.Contains(TEXT("😀")));
+	TestFalse(TEXT("Non-BMP CJK is UTF-8 percent encoded"), SyntheticUrl.Contains(TEXT("𠮷")));
 	FString DecodedSyntheticPath = FGenericPlatformHttp::UrlDecode(SyntheticUrl.RightChop(8));
 	FPaths::NormalizeFilename(DecodedSyntheticPath);
 	TestEqual(TEXT("Decoded synthetic URL preserves the complete absolute path"), DecodedSyntheticPath, SyntheticAbsolutePath);
@@ -126,16 +319,16 @@ bool FEChartsConsoleHandshakeTest::RunTest(const FString& Parameters)
 	Widget->OnEChartsError.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleError);
 
 	Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
-	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_WARNING__:local fallback"), TEXT("chart-host.html"), 8);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_WARNING__:1:local fallback"), TEXT("chart-host.html"), 8);
 	TestEqual(TEXT("Warning broadcasts once"), Sink->WarningCount, 1);
 	TestEqual(TEXT("Warning strips marker"), Sink->LastWarning, FString(TEXT("local fallback")));
 	TestEqual(TEXT("Warning does not change Loading"), Widget->RuntimeState, EEChartsRuntimeState::Loading);
 
-	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__"), TEXT("chart-host.html"), 9);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), TEXT("chart-host.html"), 9);
 	TestEqual(TEXT("Ready broadcasts once"), Sink->ReadyCount, 1);
 	TestEqual(TEXT("Ready state"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
 
-	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:bad option"), TEXT("chart-host.html"), 10);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:1:bad option"), TEXT("chart-host.html"), 10);
 	TestEqual(TEXT("Error broadcasts once"), Sink->ErrorCount, 1);
 	TestEqual(TEXT("Error strips marker"), Sink->LastError, FString(TEXT("bad option")));
 	TestEqual(TEXT("Error state"), Widget->RuntimeState, EEChartsRuntimeState::Error);
@@ -159,6 +352,61 @@ bool FEChartsCSPNoNetworkTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("No HTTPS resources"), Html.Contains(TEXT("https://"), ESearchCase::IgnoreCase));
 	TestFalse(TEXT("No protocol-relative resources"), Html.Contains(TEXT("src=\"//"), ESearchCase::IgnoreCase));
 	TestTrue(TEXT("Page emits ready marker"), Html.Contains(TEXT("__UE_ECHARTS_READY__")));
+	TestTrue(TEXT("Page reads the load generation query"), Html.Contains(TEXT("URLSearchParams")) && Html.Contains(TEXT("generation")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsStagingRulesTest,
+	"EChartsWidget.StagingRules", EChartsWidgetTests::Flags)
+bool FEChartsStagingRulesTest::RunTest(const FString& Parameters)
+{
+	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("EChartsWidget"));
+	TestTrue(TEXT("EChartsWidget plugin is discoverable"), Plugin.IsValid());
+	if (!Plugin.IsValid())
+	{
+		return false;
+	}
+
+	FString BuildRules;
+	const FString BuildRulesPath = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Source/EChartsWidget/EChartsWidget.Build.cs"));
+	TestTrue(TEXT("Build rules can be read"), FFileHelper::LoadFileToString(BuildRules, *BuildRulesPath));
+	TestTrue(TEXT("Resources/Web files are enumerated for staging"), BuildRules.Contains(TEXT("Resources/Web")));
+	TestTrue(TEXT("ThirdPartyLicenses files are enumerated for staging"), BuildRules.Contains(TEXT("ThirdPartyLicenses")));
+	TestTrue(TEXT("Runtime dependencies are registered"), BuildRules.Contains(TEXT("RuntimeDependencies.Add")));
+	TestTrue(TEXT("Runtime dependencies use NonUFS staging"), BuildRules.Contains(TEXT("StagedFileType.NonUFS")));
+	TestTrue(TEXT("Staging target remains plugin-relative"), BuildRules.Contains(TEXT("$(PluginDir)")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsErrorTerminalStateTest,
+	"EChartsWidget.ErrorTerminalState", EChartsWidgetTests::Flags)
+bool FEChartsErrorTerminalStateTest::RunTest(const FString& Parameters)
+{
+	UEChartsWidget* Widget = EChartsWidgetTests::MakeWidget();
+	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>();
+	Sink->AddToRoot();
+	Widget->OnChartReady.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleReady);
+	Widget->OnEChartsError.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleError);
+
+	Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:1:first failure"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	TestEqual(TEXT("Error broadcasts once"), Sink->ErrorCount, 1);
+	TestEqual(TEXT("Ready after Error is ignored"), Sink->ReadyCount, 0);
+	TestEqual(TEXT("Error is terminal for its generation"), Widget->RuntimeState, EEChartsRuntimeState::Error);
+	TestEqual(TEXT("Terminal error is retained"), Widget->LastError, FString(TEXT("first failure")));
+
+	Widget->InitializeECharts(EEChartsTemplate::CustomOption, EEChartsInteractionMode::FullHover);
+	TestEqual(TEXT("Reinitialize returns to Loading"), Widget->RuntimeState, EEChartsRuntimeState::Loading);
+	TestTrue(TEXT("Reinitialize clears LastError"), Widget->LastError.IsEmpty());
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:1:stale failure"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	TestEqual(TEXT("Stale Error does not rebroadcast"), Sink->ErrorCount, 1);
+	TestEqual(TEXT("New generation can become Ready"), Sink->ReadyCount, 1);
+	TestEqual(TEXT("New generation reaches Ready"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
+
+	Sink->RemoveFromRoot();
+	EChartsWidgetTests::DestroyWidget(Widget);
 	return true;
 }
 
@@ -170,21 +418,28 @@ bool FEChartsLifecycleNoDuplicateReadyTest::RunTest(const FString& Parameters)
 	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>();
 	Sink->AddToRoot();
 	Widget->OnChartReady.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleReady);
+	Widget->OnEChartsError.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleError);
 
 	Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
-	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__"), FString(), 0);
-	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__"), FString(), 0);
+	Widget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap, EEChartsInteractionMode::FullHover);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:1:stale"), FString(), 0);
+	TestEqual(TEXT("Old generation Ready is ignored"), Sink->ReadyCount, 0);
+	TestEqual(TEXT("Old generation Error is ignored"), Sink->ErrorCount, 0);
+	TestEqual(TEXT("Old generation messages leave current load Loading"), Widget->RuntimeState, EEChartsRuntimeState::Loading);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
 	TestEqual(TEXT("Duplicate marker broadcasts once per load"), Sink->ReadyCount, 1);
 
 	Widget->ReleaseSlateResources(false);
 	TestEqual(TEXT("Release resets runtime state"), Widget->RuntimeState, EEChartsRuntimeState::Uninitialized);
-	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
 	TestEqual(TEXT("Released widget ignores marker"), Sink->ReadyCount, 1);
 
 	Widget->RebindConsoleMessageForTesting();
 	Widget->RebindConsoleMessageForTesting();
 	Widget->InitializeECharts(EEChartsTemplate::CustomOption, EEChartsInteractionMode::Disabled);
-	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
 	TestEqual(TEXT("Rebinding twice does not duplicate callbacks"), Sink->ReadyCount, 2);
 
 	Sink->RemoveFromRoot();

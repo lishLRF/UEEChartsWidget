@@ -42,29 +42,42 @@ public:
 
 	UEChartsWidget(const FObjectInitializer& ObjectInitializer);
 
+	/**
+	 * Starts an asynchronous local-page load for a new generation.
+	 * Each call supersedes earlier loads; console events from older generations are ignored.
+	 * Chart commands issued before OnChartReady should be cached for the current generation.
+	 * Error is terminal for one generation, so call InitializeECharts again to recover.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "ECharts")
 	void InitializeECharts(
 		EEChartsTemplate Template = EEChartsTemplate::SegmentedAreaLine,
 		EEChartsInteractionMode InInteractionMode = EEChartsInteractionMode::ClickOnly);
 
+	/** Template selected for the current asynchronous load generation. */
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	EEChartsTemplate CurrentTemplate = EEChartsTemplate::SegmentedAreaLine;
 
+	/** Interaction behavior selected for the current asynchronous load generation. */
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	EEChartsInteractionMode InteractionMode = EEChartsInteractionMode::ClickOnly;
 
+	/** Current generation state. Error remains terminal until InitializeECharts starts a new generation. */
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	EEChartsRuntimeState RuntimeState = EEChartsRuntimeState::Uninitialized;
 
+	/** Current generation error text, cleared by InitializeECharts. */
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	FString LastError;
 
+	/** Broadcast once when the current generation reports Ready. */
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
 	FOnChartReady OnChartReady;
 
+	/** Broadcast for a warning emitted by the current non-terminal generation. */
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
 	FOnEChartsWarning OnEChartsWarning;
 
+	/** Broadcast once when the current generation enters its terminal Error state. */
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
 	FOnEChartsError OnEChartsError;
 
@@ -87,6 +100,7 @@ private:
 
 	void BindConsoleMessage();
 
+	uint64 LoadGeneration = 0;
 	bool bReadyBroadcast = false;
 };
 

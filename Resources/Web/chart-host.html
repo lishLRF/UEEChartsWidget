@@ -10,6 +10,9 @@
 </head>
 <body>
   <div id="chart"></div>
-  <script nonce="echarts-host">console.log('__UE_ECHARTS_READY__');</script>
+  <script nonce="echarts-host">
+    const generation = new URLSearchParams(window.location.search).get('generation') || '0';
+    console.log('__UE_ECHARTS_READY__:' + generation);
+  </script>
 </body>
 </html>

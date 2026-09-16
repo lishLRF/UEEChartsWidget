@@ -1,6 +1,5 @@
 #include "EChartsWidget.h"
 
-#include "GenericPlatform/GenericPlatformHttp.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 
@@ -8,9 +7,56 @@
 
 namespace
 {
-	const FString ReadyMarker = TEXT("__UE_ECHARTS_READY__");
+	const FString ReadyMarker = TEXT("__UE_ECHARTS_READY__:");
 	const FString WarningMarker = TEXT("__UE_ECHARTS_WARNING__:");
 	const FString ErrorMarker = TEXT("__UE_ECHARTS_ERROR__:");
+
+	bool TryParseGeneration(const FString& Text, uint64& OutGeneration)
+	{
+		return !Text.IsEmpty() && LexTryParseString(OutGeneration, *Text);
+	}
+
+	bool TryParseGenerationAndPayload(
+		const FString& Text,
+		uint64& OutGeneration,
+		FString& OutPayload)
+	{
+		FString GenerationText;
+		return Text.Split(TEXT(":"), &GenerationText, &OutPayload) &&
+			TryParseGeneration(GenerationText, OutGeneration);
+	}
+
+	FString PercentEncodeFilePath(const FString& Path)
+	{
+		const FTCHARToUTF8 Utf8(*Path);
+		const ANSICHAR* Bytes = Utf8.Get();
+		const TCHAR HexDigits[] = TEXT("0123456789ABCDEF");
+		FString Encoded;
+		Encoded.Reserve(Utf8.Length() * 3);
+
+		for (int32 Index = 0; Index < Utf8.Length(); ++Index)
+		{
+			const uint8 Byte = static_cast<uint8>(Bytes[Index]);
+			const bool bUnreserved =
+				(Byte >= 'A' && Byte <= 'Z') ||
+				(Byte >= 'a' && Byte <= 'z') ||
+				(Byte >= '0' && Byte <= '9') ||
+				Byte == '-' || Byte == '_' || Byte == '.' || Byte == '~';
+
+			if (bUnreserved || Byte == '/' || Byte == ':')
+			{
+				Encoded.AppendChar(static_cast<TCHAR>(Byte));
+			}
+			else
+			{
+				Encoded.AppendChar(TEXT('%'));
+				Encoded.AppendChar(HexDigits[Byte >> 4]);
+				Encoded.AppendChar(HexDigits[Byte & 0x0F]);
+			}
+		}
+
+		return Encoded;
+	}
 }
 
 UEChartsWidget::UEChartsWidget(const FObjectInitializer& ObjectInitializer)
@@ -30,8 +76,15 @@ void UEChartsWidget::InitializeECharts(
 	RuntimeState = EEChartsRuntimeState::Loading;
 	LastError.Reset();
 	bReadyBroadcast = false;
+	if (++LoadGeneration == 0)
+	{
+		++LoadGeneration;
+	}
 
-	InitialURL = FEChartsWidgetResourceLocator::GetChartHostUrl();
+	InitialURL = FString::Printf(
+		TEXT("%s?generation=%llu"),
+		*FEChartsWidgetResourceLocator::GetChartHostUrl(),
+		LoadGeneration);
 	LoadURL(InitialURL);
 }
 
@@ -55,9 +108,13 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 	const FString& Source,
 	const int32 Line)
 {
-	if (Message == ReadyMarker)
+	if (Message.StartsWith(ReadyMarker))
 	{
-		if (!bReadyBroadcast)
+		uint64 MessageGeneration = 0;
+		if (TryParseGeneration(Message.RightChop(ReadyMarker.Len()), MessageGeneration) &&
+			MessageGeneration == LoadGeneration &&
+			RuntimeState != EEChartsRuntimeState::Error &&
+			!bReadyBroadcast)
 		{
 			bReadyBroadcast = true;
 			RuntimeState = EEChartsRuntimeState::Ready;
@@ -68,15 +125,31 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 
 	if (Message.StartsWith(WarningMarker))
 	{
-		OnEChartsWarning.Broadcast(Message.RightChop(WarningMarker.Len()));
+		uint64 MessageGeneration = 0;
+		FString Warning;
+		if (TryParseGenerationAndPayload(
+			Message.RightChop(WarningMarker.Len()), MessageGeneration, Warning) &&
+			MessageGeneration == LoadGeneration &&
+			RuntimeState != EEChartsRuntimeState::Error)
+		{
+			OnEChartsWarning.Broadcast(Warning);
+		}
 		return;
 	}
 
 	if (Message.StartsWith(ErrorMarker))
 	{
-		LastError = Message.RightChop(ErrorMarker.Len());
-		RuntimeState = EEChartsRuntimeState::Error;
-		OnEChartsError.Broadcast(LastError);
+		uint64 MessageGeneration = 0;
+		FString Error;
+		if (TryParseGenerationAndPayload(
+			Message.RightChop(ErrorMarker.Len()), MessageGeneration, Error) &&
+			MessageGeneration == LoadGeneration &&
+			RuntimeState != EEChartsRuntimeState::Error)
+		{
+			LastError = Error;
+			RuntimeState = EEChartsRuntimeState::Error;
+			OnEChartsError.Broadcast(LastError);
+		}
 	}
 }
 
@@ -126,10 +199,7 @@ FString FEChartsWidgetResourceLocator::BuildHostPageUrlForPath(const FString& Pa
 	FString AbsolutePath = FPaths::ConvertRelativePathToFull(Path);
 	FPaths::NormalizeFilename(AbsolutePath);
 
-	FString EncodedPath = FGenericPlatformHttp::UrlEncode(AbsolutePath);
-	EncodedPath.ReplaceInline(TEXT("%2F"), TEXT("/"), ESearchCase::IgnoreCase);
-	EncodedPath.ReplaceInline(TEXT("%3A"), TEXT(":"), ESearchCase::IgnoreCase);
-	return FString(TEXT("file:///")) + EncodedPath;
+	return FString(TEXT("file:///")) + PercentEncodeFilePath(AbsolutePath);
 }
 
 #undef LOCTEXT_NAMESPACE
