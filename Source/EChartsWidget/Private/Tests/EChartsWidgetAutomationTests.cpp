@@ -2,8 +2,10 @@
 
 #include "EChartsWidget.h"
 #include "EChartsWidgetTestSink.h"
+#include "GenericPlatform/GenericPlatformHttp.h"
 #include "WebBrowser.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformMisc.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "UObject/UnrealType.h"
@@ -76,6 +78,31 @@ bool FEChartsLocalResourceUrlTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("URL uses file scheme"), HostUrl.StartsWith(TEXT("file:///")));
 	TestFalse(TEXT("URL contains no backslashes"), HostUrl.Contains(TEXT("\\")));
 	TestFalse(TEXT("URL is not HTTP"), HostUrl.StartsWith(TEXT("http://")) || HostUrl.StartsWith(TEXT("https://")));
+	FString DecodedHostPath = FGenericPlatformHttp::UrlDecode(HostUrl.RightChop(8));
+	FString NormalizedHostPath = HostPath;
+	FPaths::NormalizeFilename(DecodedHostPath);
+	FPaths::NormalizeFilename(NormalizedHostPath);
+	TestEqual(TEXT("Decoded host URL preserves the absolute host path"), DecodedHostPath, NormalizedHostPath);
+
+	FString SyntheticAbsolutePath = FPaths::ConvertRelativePathToFull(FPaths::Combine(
+		FPlatformMisc::RootDir(),
+		TEXT("ECharts URL Tests"),
+		TEXT("space # percent% Unicode-数据"),
+		TEXT("chart-host.html")));
+	FPaths::NormalizeFilename(SyntheticAbsolutePath);
+	const FString SyntheticUrl = FEChartsWidgetResourceLocator::BuildHostPageUrlForPath(SyntheticAbsolutePath);
+	TestTrue(TEXT("Synthetic URL uses an absolute file URI"), SyntheticUrl.StartsWith(TEXT("file:///")));
+	TestFalse(TEXT("Synthetic URL contains no parent traversal"), SyntheticUrl.Contains(TEXT("../")));
+	TestFalse(TEXT("Synthetic URL contains no backslashes"), SyntheticUrl.Contains(TEXT("\\")));
+	TestFalse(TEXT("Forward slashes remain URI separators"), SyntheticUrl.Contains(TEXT("%2F"), ESearchCase::IgnoreCase));
+	TestFalse(TEXT("Drive colon remains a URI separator"), SyntheticUrl.Contains(TEXT("%3A"), ESearchCase::IgnoreCase));
+	TestTrue(TEXT("Spaces are percent encoded"), SyntheticUrl.Contains(TEXT("%20")));
+	TestTrue(TEXT("Hash is percent encoded"), SyntheticUrl.Contains(TEXT("%23")));
+	TestTrue(TEXT("Percent is percent encoded"), SyntheticUrl.Contains(TEXT("%25")));
+	TestFalse(TEXT("Unicode is UTF-8 percent encoded"), SyntheticUrl.Contains(TEXT("数据")));
+	FString DecodedSyntheticPath = FGenericPlatformHttp::UrlDecode(SyntheticUrl.RightChop(8));
+	FPaths::NormalizeFilename(DecodedSyntheticPath);
+	TestEqual(TEXT("Decoded synthetic URL preserves the complete absolute path"), DecodedSyntheticPath, SyntheticAbsolutePath);
 
 	UEChartsWidget* Widget = EChartsWidgetTests::MakeWidget();
 	Widget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap, EEChartsInteractionMode::FullHover);

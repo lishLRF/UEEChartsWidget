@@ -1,5 +1,6 @@
 #include "EChartsWidget.h"
 
+#include "GenericPlatform/GenericPlatformHttp.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 
@@ -112,20 +113,23 @@ FString FEChartsWidgetResourceLocator::GetChartHostPath()
 
 FString FEChartsWidgetResourceLocator::GetChartHostUrl()
 {
-	return ToFileUrl(GetChartHostPath());
+	return BuildHostPageUrlForPath(GetChartHostPath());
 }
 
-FString FEChartsWidgetResourceLocator::ToFileUrl(const FString& AbsolutePath)
+FString FEChartsWidgetResourceLocator::BuildHostPageUrlForPath(const FString& Path)
 {
-	if (AbsolutePath.IsEmpty())
+	if (Path.IsEmpty())
 	{
 		return FString();
 	}
 
-	FString NormalizedPath = AbsolutePath;
-	FPaths::MakeStandardFilename(NormalizedPath);
-	NormalizedPath.ReplaceInline(TEXT(" "), TEXT("%20"));
-	return FString(TEXT("file:///")) + NormalizedPath;
+	FString AbsolutePath = FPaths::ConvertRelativePathToFull(Path);
+	FPaths::NormalizeFilename(AbsolutePath);
+
+	FString EncodedPath = FGenericPlatformHttp::UrlEncode(AbsolutePath);
+	EncodedPath.ReplaceInline(TEXT("%2F"), TEXT("/"), ESearchCase::IgnoreCase);
+	EncodedPath.ReplaceInline(TEXT("%3A"), TEXT(":"), ESearchCase::IgnoreCase);
+	return FString(TEXT("file:///")) + EncodedPath;
 }
 
 #undef LOCTEXT_NAMESPACE

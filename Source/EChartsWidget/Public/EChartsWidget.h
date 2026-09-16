@@ -95,5 +95,5 @@ class ECHARTSWIDGET_API FEChartsWidgetResourceLocator
 public:
 	static FString GetChartHostPath();
 	static FString GetChartHostUrl();
-	static FString ToFileUrl(const FString& AbsolutePath);
+	static FString BuildHostPageUrlForPath(const FString& Path);
 };

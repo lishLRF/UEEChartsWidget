@@ -18,5 +18,7 @@ public class EChartsWidget : ModuleRules
 			"WebBrowser",
 			"Projects"
 		});
+
+		PrivateDependencyModuleNames.Add("HTTP");
 	}
 }
