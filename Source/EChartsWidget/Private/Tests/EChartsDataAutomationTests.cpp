@@ -157,7 +157,7 @@ namespace EChartsDataTests
 			State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
 			State->Widget->SetForceWebGLUnavailableForTesting(bForceFallback);
 			State->SlateWidget = State->Widget->TakeWidget();
-			TArray<FEChartsDataPoint3D> Data3D = {{1.0, 2.0, 3.0, 4.0, 5.0}};
+			TArray<FEChartsDataPoint3D> Data3D = {{10.5, 200.0, 3.0, 4.0, 5.0}};
 			State->Widget->Set3DData(0, Data3D);
 			State->Widget->InitializeECharts(Template, EEChartsInteractionMode::ClickOnly);
 			State->Widget->ApplyEChartsChanges();
@@ -193,12 +193,24 @@ namespace EChartsDataTests
 				Test->TestEqual(TEXT("3D CEF APPLIED point count"), State->Sink->LastAppliedPointCount, 1);
 				Test->TestEqual(TEXT("3D CEF APPLIED revision"), State->Sink->LastAppliedRevision, int64(1));
 				const bool bExpect3D = ExpectedType.EndsWith(TEXT("3D"));
+				const bool bExpectHeatmap = ExpectedType == TEXT("heatmap");
+				const FString DataCheck = bExpectHeatmap
+					? TEXT("JSON.stringify(s.data[0])===JSON.stringify([0,0,3])&&JSON.stringify(s.ueOriginalData[0])===JSON.stringify([10.5,200,3,4,5])")
+					: TEXT("JSON.stringify(s.data[0])===JSON.stringify([10.5,200,3,4,5])");
+				const FString CoordinateCheck = bExpectHeatmap
+					? TEXT("o.xAxis[0].type==='category'&&o.yAxis[0].type==='category'&&o.xAxis[0].data[0]===10.5&&o.yAxis[0].data[0]===200")
+					: (bExpect3D ? TEXT("hasGrid") : TEXT("!hasGrid&& !/3D$/.test(s.type)"));
+				const FString GraphicCheck = bExpectHeatmap
+					? TEXT("(function(){var g=window.UEEChartsHost.getGraphicShapeStatsForTesting();return g.heatmapRectCount>0&&g.allFinite;}())")
+					: TEXT("true");
 				State->Widget->ExecuteJavascript(FString::Printf(TEXT(
 					"(function(){var o=window.UEEChartsHost.getOptionForTesting();var s=o.series[0];"
-					"var hasGrid=!!o.grid3D;var ok=s.type==='%s'&&JSON.stringify(s.data[0])===JSON.stringify([1,2,3,4,5])&&"
-					"%s;console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"),
+					"var hasGrid=!!o.grid3D;var ok=s.type==='%s'&&%s&&%s&&%s;"
+					"console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"),
 					*ExpectedType,
-					bExpect3D ? TEXT("hasGrid") : TEXT("!hasGrid&& !/3D$/.test(s.type)")));
+					*DataCheck,
+					*CoordinateCheck,
+					*GraphicCheck));
 				State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0;
 				return true;
 			}

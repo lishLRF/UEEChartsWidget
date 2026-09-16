@@ -4,6 +4,9 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+const echarts = require(path.resolve(__dirname, '..', '..', 'Resources', 'Web', 'vendor', 'echarts.min.js'));
+const templates = require(path.resolve(__dirname, '..', '..', 'Resources', 'Web', 'templates.js'));
+
 const hostSource = fs.readFileSync(
   path.resolve(__dirname, '..', '..', 'Resources', 'Web', 'chart-host.js'),
   'utf8',
@@ -215,7 +218,7 @@ test('3D data maps by the current effective template including WebGL fallbacks',
   const cases = [
     { requested: 'Bar3DHeightMap', effective: 'Bar3DHeightMap', expectedType: 'bar3D', hasGrid3D: true },
     { requested: 'DataTableScatter3D', effective: 'DataTableScatter3D', expectedType: 'scatter3D', hasGrid3D: true },
-    { requested: 'Bar3DHeightMap', effective: 'Bar3DHeightMap2D', expectedType: 'heatmap', hasGrid3D: false },
+    { requested: 'Bar3DHeightMap', effective: 'Bar3DHeightMap2D', expectedType: 'heatmap', hasGrid3D: false, heatmap: true },
     { requested: 'DataTableScatter3D', effective: 'DataTableScatter2D', expectedType: 'scatter', hasGrid3D: false },
   ];
 
@@ -245,7 +248,61 @@ test('3D data maps by the current effective template including WebGL fallbacks',
 
     assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload(payload)), true, item.effective);
     assert.equal(appliedOption.series[0].type, item.expectedType, item.effective);
-    assert.equal(JSON.stringify(appliedOption.series[0].data), JSON.stringify([[1, 2, 3, 4, 5]]), item.effective);
+    assert.equal(JSON.stringify(appliedOption.series[0].data),
+      JSON.stringify(item.heatmap ? [[0, 0, 3]] : [[1, 2, 3, 4, 5]]), item.effective);
+    if (item.heatmap) {
+      assert.equal(JSON.stringify(appliedOption.series[0].ueOriginalData), JSON.stringify([[1, 2, 3, 4, 5]]));
+      assert.equal(JSON.stringify(appliedOption.xAxis.data), JSON.stringify([1]));
+      assert.equal(JSON.stringify(appliedOption.yAxis.data), JSON.stringify([2]));
+    }
     if (!item.hasGrid3D) assert.doesNotMatch(appliedOption.series[0].type, /3D$/);
+  }
+});
+
+test('Bar3D height-map fallback produces finite heatmap rectangles for arbitrary numeric coordinates', () => {
+  const state = createHostContext();
+  let appliedOption = null;
+  state.window.location.search = '?generation=7&forceWebGL=0';
+  state.window.UEEChartsTemplates = templates;
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) { appliedOption = option; },
+    getOption() { return appliedOption || { series: [] }; },
+  });
+  vm.runInContext(hostSource, state.context);
+  assert.equal(state.window.UEEChartsHost.renderTemplate('Bar3DHeightMap', {}, 'ClickOnly'), 'Bar3DHeightMap2D');
+
+  const payload = {
+    revision: 4,
+    template: 'Bar3DHeightMap',
+    xAxisMode: 'ShowAll',
+    series: [{
+      index: 0,
+      name: 'Heat',
+      type: 'data3D',
+      data: [[10.5, 200, 3, 30, 5], [-7.25, 900, 6, 60, 8]],
+    }],
+  };
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload(payload)), true);
+
+  const chart = echarts.init(null, null, { renderer: 'svg', ssr: true, width: 320, height: 200 });
+  try {
+    chart.setOption(appliedOption);
+    const option = chart.getOption();
+    assert.equal(option.xAxis[0].type, 'category');
+    assert.equal(option.yAxis[0].type, 'category');
+    assert.equal(JSON.stringify(option.xAxis[0].data), JSON.stringify([10.5, -7.25]));
+    assert.equal(JSON.stringify(option.yAxis[0].data), JSON.stringify([200, 900]));
+    assert.equal(JSON.stringify(option.series[0].data), JSON.stringify([[0, 0, 3], [1, 1, 6]]));
+    assert.equal(JSON.stringify(option.series[0].ueOriginalData), JSON.stringify(payload.series[0].data));
+
+    const rects = chart.getZr().storage.getDisplayList(true).filter((item) => item.type === 'rect');
+    assert.ok(rects.length >= payload.series[0].data.length);
+    const firstHeatmapRect = rects[rects.length - payload.series[0].data.length];
+    for (const field of ['x', 'y', 'width', 'height']) {
+      assert.equal(Number.isFinite(firstHeatmapRect.shape[field]), true, `heatmap ${field} must be finite`);
+    }
+  } finally {
+    chart.dispose();
   }
 });

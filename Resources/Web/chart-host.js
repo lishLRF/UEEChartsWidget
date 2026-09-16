@@ -105,6 +105,27 @@
           }
         });
       });
+      const useHeatmapAxes = currentEffectiveTemplate === 'Bar3DHeightMap2D' &&
+        payload.series.some(function (series) { return series.type === 'data3D'; });
+      const heatmapXDomain = [];
+      const heatmapYDomain = [];
+      const heatmapXIndices = new Map();
+      const heatmapYIndices = new Map();
+      if (useHeatmapAxes) {
+        payload.series.forEach(function (series) {
+          if (series.type !== 'data3D') return;
+          series.data.forEach(function (point) {
+            if (!heatmapXIndices.has(point[0])) {
+              heatmapXIndices.set(point[0], heatmapXDomain.length);
+              heatmapXDomain.push(point[0]);
+            }
+            if (!heatmapYIndices.has(point[1])) {
+              heatmapYIndices.set(point[1], heatmapYDomain.length);
+              heatmapYDomain.push(point[1]);
+            }
+          });
+        });
+      }
       let has2DSeries = false;
       option.series = payload.series.map(function (input, index) {
         const prototype = oldSeries[index] || oldSeries[0] || {};
@@ -130,7 +151,15 @@
             output.type = 'scatter';
             has2DSeries = true;
           }
-          output.data = clone(input.data);
+          output.data = output.type === 'heatmap'
+            ? input.data.map(function (point) {
+              return [heatmapXIndices.get(point[0]), heatmapYIndices.get(point[1]), point[2]];
+            })
+            : clone(input.data);
+          if (output.type === 'heatmap') {
+            output.dimensions = ['xIndex', 'yIndex', 'z'];
+            output.ueOriginalData = clone(input.data);
+          }
           if (output.type === 'bar3D' || output.type === 'scatter3D') {
             output.encode = { x: 0, y: 1, z: 2, tooltip: [0, 1, 2, 3, 4] };
           } else {
@@ -155,12 +184,16 @@
       option.legend = Array.isArray(option.legend) ? legends : legends[0];
 
       if (has2DSeries) {
-        if (payload.xAxisMode === 'Category' || categoryLabels.length > 0) {
+        if (useHeatmapAxes) {
+          updateAxis(option, 'xAxis', { type: 'category', data: heatmapXDomain });
+          updateAxis(option, 'yAxis', { type: 'category', data: heatmapYDomain });
+        } else if (payload.xAxisMode === 'Category' || categoryLabels.length > 0) {
           updateAxis(option, 'xAxis', { type: 'category', data: categoryLabels });
+          updateAxis(option, 'yAxis', { type: 'value' });
         } else {
           updateAxis(option, 'xAxis', { type: 'value', data: undefined });
+          updateAxis(option, 'yAxis', { type: 'value' });
         }
-        updateAxis(option, 'yAxis', { type: 'value' });
         if (!option.grid) option.grid = { left: 58, right: 24, top: 42, bottom: 44 };
       }
       return window.UEEChartsTemplates.applyInteractionMode(option, currentInteractionMode);
@@ -215,6 +248,18 @@
       },
       getOptionForTesting: function () {
         return chart.getOption();
+      },
+      getGraphicShapeStatsForTesting: function () {
+        const displayList = chart.getZr().storage.getDisplayList(true);
+        const rects = displayList.filter(function (item) { return item.type === 'rect' && item.shape; });
+        return {
+          heatmapRectCount: rects.length,
+          allFinite: rects.every(function (item) {
+            return ['x', 'y', 'width', 'height'].every(function (field) {
+              return Number.isFinite(item.shape[field]);
+            });
+          })
+        };
       },
       resize: resizeChart,
       dispose: function () {
