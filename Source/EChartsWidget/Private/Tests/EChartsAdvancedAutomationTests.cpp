@@ -539,6 +539,61 @@ namespace EChartsAdvancedTests
 		UEChartsWidget* Widget = nullptr;
 		double Deadline = 0.0;
 	};
+
+	class FAsyncPayloadOptionBarrierCommand final : public IAutomationLatentCommand
+	{
+	public:
+		FAsyncPayloadOptionBarrierCommand(FAutomationTestBase* InTest, const bool bInRebuild)
+			: Test(InTest), bRebuild(bInRebuild) {}
+		virtual bool Update() override
+		{
+			if (!Widget)
+			{
+				Deadline = FPlatformTime::Seconds() + 15.0;
+				Widget = MakeWidget(); Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+				Widget->OnOptionApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleOptionApplied);
+				Widget->InitializeECharts(); Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+				Widget->SetSeriesData(0, {{1, 1}, {2, 2}});
+				Widget->BlockNextPayloadBuildForTesting(); Widget->ApplyEChartsChanges();
+				Test->TestTrue(TEXT("Barrier stale test starts gated build"), Widget->IsPayloadBuildInFlightForTesting());
+				Test->TestTrue(TEXT("Barrier stale candidate accepted"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"candidate\"}}")));
+				if (bRebuild)
+				{
+					Widget->ReleaseSlateResources(false); Widget->PrepareRebuildForTesting();
+					Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+				}
+				else Widget->SetSeriesData(0, {{3, 3}});
+				Widget->ReleasePayloadBuildForTesting();
+				return false;
+			}
+			if (FPlatformTime::Seconds() >= Deadline) { Test->AddError(TEXT("Async build option barrier timeout")); Cleanup(); return true; }
+			if (Widget->GetPendingOptionRequestIdForTesting() > 0)
+			{
+				const int32 Generation = bRebuild ? 2 : 1;
+				const int64 Request = Widget->GetPendingOptionRequestIdForTesting();
+				Test->TestFalse(TEXT("Stale payload build clears before option send"), Widget->IsPayloadBuildInFlightForTesting());
+				Test->TestFalse(TEXT("Stale payload never reaches browser before option"), Widget->IsApplyInFlightForTesting());
+				Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:%d:%lld:0:failed; previous chart restored"), Generation, Request), FString(), 0);
+				Test->TestEqual(TEXT("Barrier candidate failure broadcasts exactly once"), Sink->OptionResultCount, 1);
+				Test->TestEqual(TEXT("Barrier candidate failure remains Ready"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
+				Test->TestTrue(TEXT("Failure resumes latest data build or browser submit"),
+					Widget->IsPayloadBuildInFlightForTesting() || Widget->IsApplyInFlightForTesting());
+				Cleanup(); return true;
+			}
+			return false;
+		}
+	private:
+		void Cleanup()
+		{
+			if (Widget) { Widget->ReleasePayloadBuildForTesting(); DestroyWidget(Widget); Widget = nullptr; }
+			if (Sink) { Sink->RemoveFromRoot(); Sink = nullptr; }
+		}
+		FAutomationTestBase* Test;
+		UEChartsWidget* Widget = nullptr;
+		UEChartsWidgetTestSink* Sink = nullptr;
+		double Deadline = 0.0;
+		bool bRebuild = false;
+	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAdvancedReflectionTest,
@@ -741,6 +796,34 @@ bool FEChartsAdvancedReleaseAndCoalescingTest::RunTest(const FString& Parameters
 	ExerciseRelease(false);
 	ExerciseRelease(true);
 
+	UEChartsWidget* ChainWidget = EChartsAdvancedTests::MakeWidget();
+	UEChartsWidgetTestSink* ChainSink = NewObject<UEChartsWidgetTestSink>(); ChainSink->AddToRoot();
+	ChainWidget->OnOptionApplied.AddDynamic(ChainSink, &UEChartsWidgetTestSink::HandleOptionApplied);
+	ChainWidget->InitializeECharts(); ChainWidget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	TestTrue(TEXT("Cross-generation chain candidate A accepted"), ChainWidget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"A\"}}")));
+	TestTrue(TEXT("Cross-generation chain candidate B queued"), ChainWidget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"B\"}}")));
+	const int64 ChainARequest = ChainWidget->GetPendingOptionRequestIdForTesting();
+	ChainWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:CustomOption applied"), ChainARequest), FString(), 0);
+	const FString LastGoodA = ChainWidget->GetCachedOptionBase64ForTesting();
+	const FString CandidateB = ChainWidget->GetInFlightOptionBase64ForTesting();
+	const int64 OldBRequest = ChainWidget->GetPendingOptionRequestIdForTesting();
+	ChainWidget->ReleaseSlateResources(false); ChainWidget->PrepareRebuildForTesting();
+	ChainWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:stale"), OldBRequest), FString(), 0);
+	TestEqual(TEXT("Old B ACK is ignored after chained rebuild"), ChainSink->OptionResultCount, 1);
+	ChainWidget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	const int64 ReplayARequest = ChainWidget->GetPendingOptionRequestIdForTesting();
+	TestEqual(TEXT("Chained rebuild sends cached A before pending B"), ChainWidget->GetInFlightOptionBase64ForTesting(), LastGoodA);
+	ChainWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:2:%lld:1:CustomOption applied"), ReplayARequest), FString(), 0);
+	const int64 NewBRequest = ChainWidget->GetPendingOptionRequestIdForTesting();
+	TestTrue(TEXT("Pending B is sent after cached A ACK"), NewBRequest > 0 && NewBRequest != ReplayARequest);
+	TestEqual(TEXT("Chained rebuild sends the retained B candidate"), ChainWidget->GetInFlightOptionBase64ForTesting(), CandidateB);
+	ChainWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:2:%lld:0:failed; previous chart restored"), NewBRequest), FString(), 0);
+	TestEqual(TEXT("A replay plus B failure emits exactly three option results"), ChainSink->OptionResultCount, 3);
+	TestEqual(TEXT("B failure preserves native last-good A"), ChainWidget->GetCachedOptionBase64ForTesting(), LastGoodA);
+	TestEqual(TEXT("B failure leaves CustomOption committed"), ChainWidget->CurrentTemplate, EEChartsTemplate::CustomOption);
+	TestEqual(TEXT("B failure after A replay remains Ready"), ChainWidget->RuntimeState, EEChartsRuntimeState::Ready);
+	EChartsAdvancedTests::DestroyWidget(ChainWidget); ChainSink->RemoveFromRoot();
+
 	UEChartsWidget* Widget = EChartsAdvancedTests::MakeWidget();
 	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
 	Widget->OnInteractionModeApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleInteractionModeApplied);
@@ -880,6 +963,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAsyncPayloadBuildTest,
 bool FEChartsAsyncPayloadBuildTest::RunTest(const FString& Parameters)
 {
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FAsyncPayloadBuildCommand(this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAsyncPayloadOptionBarrierRevisionTest,
+	"EChartsWidget.Advanced.AsyncPayloadOptionBarrierRevision", EChartsAdvancedTests::Flags)
+bool FEChartsAsyncPayloadOptionBarrierRevisionTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FAsyncPayloadOptionBarrierCommand(this, false));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAsyncPayloadOptionBarrierRebuildTest,
+	"EChartsWidget.Advanced.AsyncPayloadOptionBarrierRebuild", EChartsAdvancedTests::Flags)
+bool FEChartsAsyncPayloadOptionBarrierRebuildTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FAsyncPayloadOptionBarrierCommand(this, true));
 	return true;
 }
 

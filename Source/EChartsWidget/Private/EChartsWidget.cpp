@@ -554,18 +554,18 @@ void UEChartsWidget::SubmitLatestData()
 			{
 				return;
 			}
+			if (Widget->bOptionBarrierActive)
+			{
+				Widget->bApplyRequested = true;
+				Widget->SendPendingOrCachedOption();
+				return;
+			}
 			if (Generation != Widget->LoadGeneration || Revision != Widget->DataRevision ||
 				Template != Widget->CurrentTemplate || AxisMode != Widget->XAxisMode ||
 				bPreserveOrder != Widget->bPreserveStreamCategoryOrder)
 			{
 				Widget->bApplyRequested = true;
 				Widget->SubmitLatestData();
-				return;
-			}
-			if (Widget->bOptionBarrierActive)
-			{
-				Widget->bApplyRequested = true;
-				Widget->SendPendingOrCachedOption();
 				return;
 			}
 			if (!bBuilt)
@@ -660,6 +660,8 @@ void UEChartsWidget::ClearPendingAdvancedRequests(const bool bPreserveOptionCand
 	}
 	InFlightOptionBase64.Reset();
 	bInFlightOptionIsCandidate = false;
+	bInFlightOptionReplayPrerequisite = false;
+	bReplayBeforePendingCandidate = false;
 	PendingOptionRequestId = 0;
 	PendingInteractionRequestId = 0;
 	bInteractionModeQueued = false;
@@ -681,6 +683,13 @@ void UEChartsWidget::SendOptionBase64(const FString& OptionBase64, const bool bC
 void UEChartsWidget::SendPendingOrCachedOption()
 {
 	if (RuntimeState != EEChartsRuntimeState::Ready || PendingOptionRequestId != 0) return;
+	if (bReplayBeforePendingCandidate && !CachedOptionBase64.IsEmpty())
+	{
+		bReplayBeforePendingCandidate = false;
+		bInFlightOptionReplayPrerequisite = true;
+		SendOptionBase64(CachedOptionBase64, false);
+		return;
+	}
 	if (!PendingOptionBase64.IsEmpty())
 	{
 		if (bOptionBarrierActive &&
@@ -701,6 +710,8 @@ void UEChartsWidget::BeginOptionBarrier()
 	if (bOptionBarrierActive) return;
 	bOptionBarrierActive = true;
 	bOptionBarrierChainCommitted = false;
+	bReplayBeforePendingCandidate = false;
+	bInFlightOptionReplayPrerequisite = false;
 	CancelStreamTicker();
 	if (DataTableTickerHandle.IsValid())
 	{
@@ -741,6 +752,8 @@ void UEChartsWidget::ResolveOptionBarrier(const bool bCommit)
 		else ScheduleAutoApply();
 	}
 	bOptionBarrierChainCommitted = false;
+	bReplayBeforePendingCandidate = false;
+	bInFlightOptionReplayPrerequisite = false;
 }
 
 void UEChartsWidget::SendInteractionMode()
@@ -835,6 +848,10 @@ void UEChartsWidget::BeginLoadGeneration()
 {
 	CancelAutoApply();
 	ClearPendingAdvancedRequests(true);
+	if (bOptionBarrierActive && bOptionBarrierChainCommitted && !CachedOptionBase64.IsEmpty() && !PendingOptionBase64.IsEmpty())
+	{
+		bReplayBeforePendingCandidate = true;
+	}
 	bInteractionReplayPending = true;
 	bOptionReplayPending = CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (IsStreamingActive()) InvalidateStreamDelta();
@@ -887,6 +904,10 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 	else StopDataTableLoad(false);
 	CancelAutoApply();
 	ClearPendingAdvancedRequests(true);
+	if (bOptionBarrierActive && bOptionBarrierChainCommitted && !CachedOptionBase64.IsEmpty() && !PendingOptionBase64.IsEmpty())
+	{
+		bReplayBeforePendingCandidate = true;
+	}
 	bInteractionReplayPending = bHasInitialized;
 	bOptionReplayPending = bHasInitialized && CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (InFlightRevision != 0)
@@ -1059,10 +1080,12 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			MessageGeneration == LoadGeneration && RequestId == PendingOptionRequestId && RuntimeState == EEChartsRuntimeState::Ready)
 		{
 			const bool bWasCandidate = bInFlightOptionIsCandidate;
+			const bool bWasReplayPrerequisite = bInFlightOptionReplayPrerequisite;
 			const FString CompletedOptionBase64 = MoveTemp(InFlightOptionBase64);
 			PendingOptionRequestId = 0;
 			InFlightOptionBase64.Reset();
 			bInFlightOptionIsCandidate = false;
+			bInFlightOptionReplayPrerequisite = false;
 			// A cached replay is attempted at most once per generation. Keep the
 			// last-good payload for a later generation, but never spin-retry it here.
 			bOptionReplayPending = false;
@@ -1078,6 +1101,21 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				CancelAutoApply();
 			}
 			OnOptionApplied.Broadcast(bSuccess, Detail);
+			if (bWasReplayPrerequisite && !bSuccess)
+			{
+				PendingOptionBase64.Reset();
+				bOptionBarrierActive = false;
+				bOptionBarrierChainCommitted = false;
+				RuntimeState = EEChartsRuntimeState::Error;
+				LastError = TEXT("Could not restore the last successful CustomOption before applying the pending option.");
+				if (IsStreamingActive()) { StopStreaming(false); StreamState = EEChartsDataTableStreamState::Error; }
+				if (DataTableLoadState == EEChartsDataTableLoadState::Reading || DataTableLoadState == EEChartsDataTableLoadState::Processing || DataTableLoadState == EEChartsDataTableLoadState::Applying)
+				{
+					StopDataTableLoad(false); DataTableLoadState = EEChartsDataTableLoadState::Error; LastDataTableError = LastError;
+				}
+				OnEChartsError.Broadcast(LastError);
+				return;
+			}
 			if (!Detail.Contains(TEXT("rollback failed:")))
 			{
 				if (bOptionBarrierActive && bWasCandidate && PendingOptionBase64.IsEmpty() && PendingOptionRequestId == 0)

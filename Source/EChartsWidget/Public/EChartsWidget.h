@@ -289,6 +289,7 @@ public:
 	{
 		return !PendingOptionBase64.IsEmpty() ? PendingOptionBase64 : (bInFlightOptionIsCandidate ? InFlightOptionBase64 : FString());
 	}
+	const FString& GetInFlightOptionBase64ForTesting() const { return InFlightOptionBase64; }
 	int32 GetPendingAdvancedRequestCountForTesting() const
 	{
 		return PendingJavaScriptRequests.Num() + (PendingOptionRequestId > 0 ? 1 : 0) + (PendingInteractionRequestId > 0 ? 1 : 0);
@@ -417,6 +418,8 @@ private:
 	bool bInteractionReplayPending = false;
 	bool bOptionBarrierActive = false;
 	bool bOptionBarrierChainCommitted = false;
+	bool bReplayBeforePendingCandidate = false;
+	bool bInFlightOptionReplayPrerequisite = false;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
 	int32 DataTableWorkerSnapshotPointCountForTesting = 0;
