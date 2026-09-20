@@ -7,6 +7,11 @@
     console.log('__UE_ECHARTS_' + kind + '__:' + generation + (payload ? ':' + payload : ''));
   }
 
+  function emitResult(kind, requestId, success, message) {
+    const detail = String(message || '').replace(/[\r\n]+/g, ' | ');
+    emit(kind, String(requestId) + ':' + (success ? '1' : '0') + ':' + detail);
+  }
+
   function resolveWebGL() {
     const forced = parameters.get('forceWebGL');
     if (forced === '0') return false;
@@ -42,16 +47,24 @@
       return value;
     }
 
-    function decodePayload(base64) {
+    function decodeBase64Text(base64, maxBytes, label) {
       if (typeof base64 !== 'string' || base64.length === 0 || base64.length % 4 !== 0 ||
-          base64.length > Math.ceil(16 * 1024 * 1024 / 3) * 4 + 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
-        throw new Error('Invalid Base64 data payload');
+          base64.length > 4 * Math.ceil(maxBytes / 3) || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+        throw new Error('Invalid Base64 ' + label);
       }
       const binary = atob(base64);
-      if (binary.length > 16 * 1024 * 1024) throw new Error('Decoded data payload exceeds 16777216 bytes');
+      if (binary.length > maxBytes) throw new Error('Decoded ' + label + ' exceeds ' + maxBytes + ' bytes');
       const bytes = new Uint8Array(binary.length);
       for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    }
+
+    function decodePayload(base64) {
+      return JSON.parse(decodeBase64Text(base64, 16 * 1024 * 1024, 'data payload'));
+    }
+
+    function validRequestId(requestId) {
+      return Number.isSafeInteger(requestId) && requestId > 0;
     }
 
     function validatePayload(payload) {
@@ -267,6 +280,61 @@
           const detail = error && error.stack ? error.stack.replace(/[\r\n]+/g, ' | ') : (error && error.message ? error.message : String(error));
           emit('ERROR', template + ' render failed: ' + detail);
           return null;
+        }
+      },
+      setInteractionMode: function (requestId, interactionMode) {
+        try {
+          if (!validRequestId(requestId)) throw new Error('Invalid interaction request id');
+          if (!['Disabled', 'ClickOnly', 'FullHover'].includes(interactionMode)) {
+            throw new Error('Invalid interaction mode');
+          }
+          if (!currentOption) throw new Error('Chart option is not ready');
+          const option = window.UEEChartsTemplates.applyInteractionMode(currentOption, interactionMode);
+          chart.setOption(option, { notMerge: true, lazyUpdate: false });
+          currentOption = option;
+          currentInteractionMode = interactionMode;
+          emitResult('INTERACTION_RESULT', requestId, true, interactionMode);
+          return true;
+        } catch (error) {
+          const detail = error && error.message ? error.message : String(error);
+          emitResult('INTERACTION_RESULT', requestId, false, detail);
+          return false;
+        }
+      },
+      applyOptionBase64: function (requestId, base64) {
+        try {
+          if (!validRequestId(requestId)) throw new Error('Invalid option request id');
+          const optionValue = JSON.parse(decodeBase64Text(base64, 16 * 1024 * 1024, 'option payload'));
+          if (!optionValue || typeof optionValue !== 'object' || Array.isArray(optionValue)) {
+            throw new Error('ECharts option JSON must be an object');
+          }
+          const option = window.UEEChartsTemplates.applyInteractionMode(optionValue, currentInteractionMode);
+          chart.setOption(option, { notMerge: true, lazyUpdate: false });
+          currentEffectiveTemplate = 'CustomOption';
+          templateBaseOption = clone(option);
+          currentOption = option;
+          currentPayload = null;
+          emitResult('OPTION_RESULT', requestId, true, 'CustomOption applied');
+          return true;
+        } catch (error) {
+          const detail = error && error.message ? error.message : String(error);
+          emitResult('OPTION_RESULT', requestId, false, detail);
+          return false;
+        }
+      },
+      executeJavaScriptBase64: function (requestId, base64) {
+        try {
+          if (!validRequestId(requestId)) throw new Error('Invalid JavaScript request id');
+          const source = decodeBase64Text(base64, 1024 * 1024, 'JavaScript payload');
+          if (source.trim().length === 0) throw new Error('JavaScript source is empty');
+          const execute = new Function('chart', 'echarts', 'host', '"use strict";\n' + source);
+          execute.call(undefined, chart, window.echarts, hostApi);
+          emitResult('JAVASCRIPT_RESULT', requestId, true, 'JavaScript executed');
+          return true;
+        } catch (error) {
+          const detail = error && error.message ? error.message : String(error);
+          emitResult('JAVASCRIPT_RESULT', requestId, false, detail);
+          return false;
         }
       },
       applyDataBase64: function (base64) {

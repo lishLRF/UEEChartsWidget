@@ -99,6 +99,13 @@ public:
 	UFUNCTION()
 	void HandleConsoleMessage(const FString& Message, const FString& Source, int32 Line)
 	{
+		const FString AdvancedMarker = TEXT("__UE_ECHARTS_TEST_ADVANCED__:");
+		if (Message.StartsWith(AdvancedMarker))
+		{
+			++AdvancedProbeCount;
+			LastAdvancedProbe = Message.RightChop(AdvancedMarker.Len());
+			return;
+		}
 		const FString DataOptionMarker = TEXT("__UE_ECHARTS_TEST_DATA_OPTION__:1:");
 		if (Message.StartsWith(DataOptionMarker))
 		{
@@ -163,22 +170,59 @@ public:
 		}
 	}
 
+	UFUNCTION()
+	void HandleOptionApplied(bool bSuccess, const FString& Message)
+	{
+		++OptionResultCount;
+		bLastOptionSuccess = bSuccess;
+		LastAdvancedMessage = Message;
+	}
+
+	UFUNCTION()
+	void HandleInteractionModeApplied(EEChartsInteractionMode Mode, bool bSuccess, const FString& Message)
+	{
+		++InteractionResultCount;
+		LastInteractionMode = Mode;
+		bLastInteractionSuccess = bSuccess;
+		LastAdvancedMessage = Message;
+	}
+
+	UFUNCTION()
+	void HandleJavaScriptResult(int64 RequestId, bool bSuccess, const FString& Message)
+	{
+		++JavaScriptResultCount;
+		LastJavaScriptRequestId = RequestId;
+		bLastJavaScriptSuccess = bSuccess;
+		LastAdvancedMessage = Message;
+	}
+
 	int32 ReadyCount = 0;
 	int32 RenderedCount = 0;
 	int32 WarningCount = 0;
 	int32 ErrorCount = 0;
 	int32 AppliedCount = 0;
+	int32 OptionResultCount = 0;
+	int32 InteractionResultCount = 0;
+	int32 JavaScriptResultCount = 0;
 	int64 LastAppliedRevision = 0;
 	int32 LastAppliedPointCount = 0;
+	int64 LastJavaScriptRequestId = 0;
+	bool bLastOptionSuccess = false;
+	bool bLastInteractionSuccess = false;
+	bool bLastJavaScriptSuccess = false;
+	EEChartsInteractionMode LastInteractionMode = EEChartsInteractionMode::ClickOnly;
+	FString LastAdvancedMessage;
 	int32 DataOptionReportCount = 0;
 	bool bLastDataOptionSucceeded = false;
 	int32 SeriesCountReportCount = 0;
 	int32 LastSeriesCount = INDEX_NONE;
 	int32 ResizeReportCount = 0;
+	int32 AdvancedProbeCount = 0;
 	int32 LastResizeWidth = 0;
 	int32 LastResizeHeight = 0;
 	FString LastWarning;
 	FString LastError;
+	FString LastAdvancedProbe;
 	EEChartsTemplate LastRequestedTemplate = EEChartsTemplate::SegmentedAreaLine;
 	FString LastEffectiveTemplate;
 };

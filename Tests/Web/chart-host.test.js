@@ -101,6 +101,122 @@ test('reinitializing the host disposes the prior chart and observer without time
   assert.doesNotMatch(hostSource, /setInterval\s*\(|setTimeout\s*\(/);
 });
 
+test('runtime interaction changes reapply nested component rules without polling', () => {
+  const state = createHostContext();
+  let appliedOption = null;
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) { appliedOption = option; },
+    getOption() { return appliedOption || { series: [] }; },
+  });
+  vm.runInContext(hostSource, state.context);
+  const option = {
+    tooltip: { triggerOn: 'mousemove' }, legend: {}, series: { type: 'line', data: [1] },
+    baseOption: { tooltip: {}, legend: {}, series: [{ type: 'line', data: [2] }] },
+    options: [{ tooltip: {}, series: { type: 'bar', data: [3] } }],
+    media: [{ option: { tooltip: {}, legend: {}, grid3D: { viewControl: { autoRotate: true } }, series: [{ type: 'bar3D', data: [[0, 0, 1]] }] } }],
+  };
+  state.window.UEEChartsTemplates.createTemplate = () => ({
+    requestedTemplate: 'CustomOption', effectiveTemplate: 'CustomOption', option,
+  });
+  state.window.UEEChartsHost.renderTemplate('CustomOption', {}, 'ClickOnly');
+
+  assert.equal(state.window.UEEChartsHost.setInteractionMode(11, 'Disabled'), true);
+  assert.equal(appliedOption.tooltip.triggerOn, 'none');
+  assert.equal(appliedOption.series[0].silent, true);
+  assert.equal(appliedOption.baseOption.tooltip.triggerOn, 'none');
+  assert.equal(appliedOption.options[0].series[0].silent, true);
+  assert.equal(appliedOption.media[0].option.grid3D.viewControl.rotateSensitivity, 0);
+  assert.equal(appliedOption.media[0].option.grid3D.viewControl.autoRotate, false);
+
+  assert.equal(state.window.UEEChartsHost.setInteractionMode(12, 'FullHover'), true);
+  assert.equal(appliedOption.tooltip.triggerOn, 'mousemove|click');
+  assert.equal(appliedOption.legend.selectedMode, true);
+  assert.equal(appliedOption.series[0].silent, false);
+  assert.equal(appliedOption.media[0].option.grid3D.viewControl.rotateSensitivity, 1);
+  assert.equal(appliedOption.media[0].option.grid3D.viewControl.zoomSensitivity, 1);
+  assert.equal(appliedOption.media[0].option.grid3D.viewControl.panSensitivity, 1);
+  assert.ok(state.logs.includes('__UE_ECHARTS_INTERACTION_RESULT__:7:11:1:Disabled'));
+  assert.ok(state.logs.includes('__UE_ECHARTS_INTERACTION_RESULT__:7:12:1:FullHover'));
+  assert.doesNotMatch(hostSource, /mousemove[^|]*addEventListener|setInterval\s*\(/);
+});
+
+test('custom option Base64 safely applies hostile JSON and reports recoverable setOption errors', () => {
+  const state = createHostContext();
+  let appliedOption = { title: { text: 'previous' } };
+  let failNext = false;
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) {
+      if (failNext) { failNext = false; throw new Error('synthetic setOption failure'); }
+      appliedOption = option;
+    },
+    getOption() { return appliedOption; },
+  });
+  vm.runInContext(hostSource, state.context);
+  state.window.UEEChartsHost.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  const hostile = '</script> "quotes" \\ slash 数据 😀';
+  const option = { title: { text: hostile }, tooltip: {}, legend: {}, series: [{ type: 'line', data: [1, 2] }] };
+
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(21, encodePayload(option)), true);
+  assert.equal(appliedOption.title.text, hostile);
+  assert.equal(appliedOption.tooltip.triggerOn, 'click');
+  assert.ok(state.logs.includes('__UE_ECHARTS_OPTION_RESULT__:7:21:1:CustomOption applied'));
+  assert.equal(state.context.__executed, undefined);
+
+  failNext = true;
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(22, encodePayload({ title: { text: 'bad' } })), false);
+  assert.ok(state.logs.some((line) => line.includes('__UE_ECHARTS_OPTION_RESULT__:7:22:0:synthetic setOption failure')));
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(23, encodePayload({ title: { text: 'recovered' } })), true);
+  assert.equal(appliedOption.title.text, 'recovered');
+});
+
+test('custom option rejects arrays malformed UTF-8 and decoded payloads above 16 MiB', () => {
+  const state = createHostContext();
+  vm.runInContext(hostSource, state.context);
+
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(1, encodePayload([])), false);
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(2, Buffer.from([0xc3, 0x28]).toString('base64')), false);
+  const oversized = Buffer.alloc(16 * 1024 * 1024 + 1, 0x20).toString('base64');
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(3, oversized), false);
+  assert.equal(state.logs.filter((line) => line.startsWith('__UE_ECHARTS_OPTION_RESULT__:7:')).length, 3);
+});
+
+test('advanced JavaScript receives only chart echarts and host, ACKs success, and recovers after errors', () => {
+  const state = createHostContext();
+  let appliedOption = null;
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) { appliedOption = option; },
+    getOption() { return appliedOption || {}; },
+  });
+  vm.runInContext(hostSource, state.context);
+  const modify = Buffer.from("chart.setOption({title:{text:'raw 数据 😀'}}); if (!echarts || !host) throw new Error('missing API');", 'utf8').toString('base64');
+  assert.equal(state.window.UEEChartsHost.executeJavaScriptBase64(31, modify), true);
+  assert.equal(appliedOption.title.text, 'raw 数据 😀');
+  assert.ok(state.logs.includes('__UE_ECHARTS_JAVASCRIPT_RESULT__:7:31:1:JavaScript executed'));
+
+  const throwing = Buffer.from("throw new Error('raw failure')", 'utf8').toString('base64');
+  assert.equal(state.window.UEEChartsHost.executeJavaScriptBase64(32, throwing), false);
+  assert.ok(state.logs.some((line) => line.includes('__UE_ECHARTS_JAVASCRIPT_RESULT__:7:32:0:raw failure')));
+  assert.equal(state.window.UEEChartsHost.executeJavaScriptBase64(33, Buffer.from('chart.resize()', 'utf8').toString('base64')), true);
+  assert.ok(state.logs.includes('__UE_ECHARTS_JAVASCRIPT_RESULT__:7:33:1:JavaScript executed'));
+  assert.doesNotMatch(hostSource, /UObject|ue\.interface|window\.ue/);
+});
+
+test('advanced JavaScript rejects empty malformed UTF-8 and decoded payloads above 1 MiB', () => {
+  const state = createHostContext();
+  vm.runInContext(hostSource, state.context);
+
+  assert.equal(state.window.UEEChartsHost.executeJavaScriptBase64(1, ''), false);
+  assert.equal(state.window.UEEChartsHost.executeJavaScriptBase64(2, Buffer.from([0xc3, 0x28]).toString('base64')), false);
+  const oversized = Buffer.alloc(1024 * 1024 + 1, 0x20).toString('base64');
+  assert.equal(state.window.UEEChartsHost.executeJavaScriptBase64(3, oversized), false);
+  assert.equal(state.logs.filter((line) => line.startsWith('__UE_ECHARTS_JAVASCRIPT_RESULT__:7:')).length, 3);
+});
+
 test('applyDataBase64 maps numeric, category, and 3D series without evaluating data', () => {
   const state = createHostContext();
   let appliedOption = null;
@@ -150,7 +266,7 @@ test('applyDataBase64 rejects malformed Base64 and JSON with an ERROR marker', (
 
   assert.equal(state.window.UEEChartsHost.applyDataBase64('%%%not-base64%%%'), false);
   assert.ok(state.logs.some((line) => line.startsWith('__UE_ECHARTS_ERROR__:7:')));
-  assert.doesNotMatch(hostSource, /\beval\s*\(|new\s+Function\s*\(/);
+  assert.doesNotMatch(hostSource, /\beval\s*\(/);
 });
 
 test('category series share a deterministic union domain and align missing values with null', () => {

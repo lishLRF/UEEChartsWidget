@@ -2,9 +2,13 @@
 #include "EChartsDataTableLoader.h"
 
 #include "Containers/Ticker.h"
+#include "Dom/JsonObject.h"
 #include "HAL/PlatformTime.h"
 #include "Interfaces/IPluginManager.h"
+#include "Misc/Base64.h"
 #include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 #define LOCTEXT_NAMESPACE "EChartsWidget"
 
@@ -15,6 +19,11 @@ namespace
 	const FString AppliedMarker = TEXT("__UE_ECHARTS_APPLIED__:");
 	const FString WarningMarker = TEXT("__UE_ECHARTS_WARNING__:");
 	const FString ErrorMarker = TEXT("__UE_ECHARTS_ERROR__:");
+	const FString OptionResultMarker = TEXT("__UE_ECHARTS_OPTION_RESULT__:");
+	const FString InteractionResultMarker = TEXT("__UE_ECHARTS_INTERACTION_RESULT__:");
+	const FString JavaScriptResultMarker = TEXT("__UE_ECHARTS_JAVASCRIPT_RESULT__:");
+	constexpr int32 MaxOptionJsonBytes = 16 * 1024 * 1024;
+	constexpr int32 MaxJavaScriptBytes = 1024 * 1024;
 
 	bool TryParseGeneration(const FString& Text, uint64& OutGeneration)
 	{
@@ -29,6 +38,49 @@ namespace
 		FString GenerationText;
 		return Text.Split(TEXT(":"), &GenerationText, &OutPayload) &&
 			TryParseGeneration(GenerationText, OutGeneration);
+	}
+
+	bool TryParseAdvancedResult(
+		const FString& Text,
+		uint64& OutGeneration,
+		uint64& OutRequestId,
+		bool& bOutSuccess,
+		FString& OutMessage)
+	{
+		FString GenerationText;
+		FString Remainder;
+		FString RequestText;
+		FString SuccessText;
+		if (!Text.Split(TEXT(":"), &GenerationText, &Remainder) ||
+			!Remainder.Split(TEXT(":"), &RequestText, &Remainder) ||
+			!Remainder.Split(TEXT(":"), &SuccessText, &OutMessage) ||
+			!TryParseGeneration(GenerationText, OutGeneration) ||
+			!LexTryParseString(OutRequestId, *RequestText) || OutRequestId == 0 ||
+			(SuccessText != TEXT("0") && SuccessText != TEXT("1")))
+		{
+			return false;
+		}
+		bOutSuccess = SuccessText == TEXT("1");
+		return true;
+	}
+
+	bool IsStrictBase64(const FString& Value)
+	{
+		if (Value.IsEmpty() || Value.Len() % 4 != 0) return false;
+		int32 Padding = 0;
+		if (Value.EndsWith(TEXT("=="))) Padding = 2;
+		else if (Value.EndsWith(TEXT("="))) Padding = 1;
+		for (int32 Index = 0; Index < Value.Len(); ++Index)
+		{
+			const TCHAR Character = Value[Index];
+			const bool bAlphaNumeric =
+				(Character >= TEXT('A') && Character <= TEXT('Z')) ||
+				(Character >= TEXT('a') && Character <= TEXT('z')) ||
+				(Character >= TEXT('0') && Character <= TEXT('9'));
+			if (bAlphaNumeric || Character == TEXT('+') || Character == TEXT('/')) continue;
+			if (Character != TEXT('=') || Index < Value.Len() - Padding) return false;
+		}
+		return true;
 	}
 
 	FString PercentEncodeFilePath(const FString& Path)
@@ -510,6 +562,108 @@ void UEChartsWidget::CancelAutoApply()
 	}
 }
 
+uint64 UEChartsWidget::AllocateAdvancedRequestId()
+{
+	static constexpr uint64 MaxJavascriptSafeInteger = 9007199254740991ULL;
+	if (NextAdvancedRequestId >= MaxJavascriptSafeInteger)
+	{
+		NextAdvancedRequestId = 0;
+	}
+	return ++NextAdvancedRequestId;
+}
+
+void UEChartsWidget::ClearPendingAdvancedRequests()
+{
+	PendingOptionRequestId = 0;
+	PendingInteractionRequestId = 0;
+	PendingJavaScriptRequests.Reset();
+}
+
+void UEChartsWidget::SendCachedOption()
+{
+	if (RuntimeState != EEChartsRuntimeState::Ready || CurrentTemplate != EEChartsTemplate::CustomOption ||
+		CachedOptionBase64.IsEmpty())
+	{
+		return;
+	}
+	PendingOptionRequestId = AllocateAdvancedRequestId();
+	bOptionReplayPending = true;
+	ExecuteJavascript(FEChartsWidgetJavascript::BuildApplyOptionCommand(PendingOptionRequestId, CachedOptionBase64));
+}
+
+void UEChartsWidget::SendInteractionMode()
+{
+	if (RuntimeState != EEChartsRuntimeState::Ready) return;
+	PendingInteractionRequestId = AllocateAdvancedRequestId();
+	bInteractionReplayPending = true;
+	ExecuteJavascript(FEChartsWidgetJavascript::BuildSetInteractionModeCommand(PendingInteractionRequestId, InteractionMode));
+}
+
+void UEChartsWidget::SetInteractionMode(const EEChartsInteractionMode Mode)
+{
+	if (!IsGameThreadMutation()) return;
+	InteractionMode = Mode;
+	bInteractionReplayPending = true;
+	if (RuntimeState == EEChartsRuntimeState::Ready)
+	{
+		SendInteractionMode();
+	}
+}
+
+bool UEChartsWidget::SetEChartsOptionJSON(const FString& OptionJson)
+{
+	if (!IsGameThreadMutation() || OptionJson.TrimStartAndEnd().IsEmpty()) return false;
+	const FTCHARToUTF8 Utf8(*OptionJson);
+	if (Utf8.Length() <= 0 || Utf8.Length() > MaxOptionJsonBytes) return false;
+
+	TSharedPtr<FJsonObject> OptionObject;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(OptionJson);
+	if (!FJsonSerializer::Deserialize(Reader, OptionObject) || !OptionObject.IsValid()) return false;
+
+	const FString Encoded = FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+	if (!IsStrictBase64(Encoded)) return false;
+
+	if (IsStreamingActive()) StopDataTableStreaming();
+	if (DataTableLoadState == EEChartsDataTableLoadState::Reading ||
+		DataTableLoadState == EEChartsDataTableLoadState::Processing ||
+		DataTableLoadState == EEChartsDataTableLoadState::Applying)
+	{
+		CancelDataTableLoad();
+	}
+	InvalidateStreamDelta();
+	CancelAutoApply();
+	bApplyRequested = false;
+	CurrentTemplate = EEChartsTemplate::CustomOption;
+	CachedOptionBase64 = Encoded;
+	bOptionReplayPending = true;
+	if (RuntimeState == EEChartsRuntimeState::Ready)
+	{
+		SendCachedOption();
+	}
+	return true;
+}
+
+bool UEChartsWidget::ExecuteEChartsJavaScript(const FString& JavaScript, int64& OutRequestId)
+{
+	OutRequestId = 0;
+	if (!IsGameThreadMutation() || RuntimeState != EEChartsRuntimeState::Ready || JavaScript.TrimStartAndEnd().IsEmpty())
+	{
+		return false;
+	}
+	const FTCHARToUTF8 Utf8(*JavaScript);
+	if (Utf8.Length() <= 0 || Utf8.Length() > MaxJavaScriptBytes) return false;
+	const FString Encoded = FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+	if (!IsStrictBase64(Encoded)) return false;
+
+	const uint64 RequestId = AllocateAdvancedRequestId();
+	const FString Command = FEChartsWidgetJavascript::BuildExecuteJavaScriptCommand(RequestId, Encoded);
+	if (Command.IsEmpty()) return false;
+	PendingJavaScriptRequests.Add(RequestId);
+	OutRequestId = static_cast<int64>(RequestId);
+	ExecuteJavascript(Command);
+	return true;
+}
+
 void UEChartsWidget::InitializeECharts(
 	const EEChartsTemplate Template,
 	const EEChartsInteractionMode InInteractionMode)
@@ -525,6 +679,8 @@ void UEChartsWidget::InitializeECharts(
 	BindConsoleMessage();
 	CurrentTemplate = Template;
 	InteractionMode = InInteractionMode;
+	bInteractionReplayPending = true;
+	bOptionReplayPending = Template == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	bHasInitialized = true;
 	bReloadOnRebuild = false;
 	BeginLoadGeneration();
@@ -534,6 +690,9 @@ void UEChartsWidget::InitializeECharts(
 void UEChartsWidget::BeginLoadGeneration()
 {
 	CancelAutoApply();
+	ClearPendingAdvancedRequests();
+	bInteractionReplayPending = true;
+	bOptionReplayPending = CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (IsStreamingActive()) InvalidateStreamDelta();
 	if (InFlightRevision != 0)
 	{
@@ -583,6 +742,9 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 	}
 	else StopDataTableLoad(false);
 	CancelAutoApply();
+	ClearPendingAdvancedRequests();
+	bInteractionReplayPending = bHasInitialized;
+	bOptionReplayPending = bHasInitialized && CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (InFlightRevision != 0)
 	{
 		bApplyRequested = true;
@@ -604,6 +766,8 @@ void UEChartsWidget::BeginDestroy()
 	StopStreaming(false);
 	StopDataTableLoad(false);
 	CancelAutoApply();
+	ClearPendingAdvancedRequests();
+	OnConsoleMessage.RemoveDynamic(this, &UEChartsWidget::HandleEChartsConsoleMessage);
 	Super::BeginDestroy();
 }
 
@@ -647,6 +811,8 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				CurrentTemplate,
 				InteractionMode,
 				PayloadJson));
+			if (bOptionReplayPending) SendCachedOption();
+			if (bInteractionReplayPending) SendInteractionMode();
 			OnChartReady.Broadcast();
 			if (bApplyRequested)
 			{
@@ -728,6 +894,58 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			bRenderedBroadcast = true;
 			EffectiveTemplate = Parts[2];
 			OnChartRendered.Broadcast(CurrentTemplate, EffectiveTemplate);
+		}
+		return;
+	}
+
+	if (Message.StartsWith(OptionResultMarker))
+	{
+		uint64 MessageGeneration = 0;
+		uint64 RequestId = 0;
+		bool bSuccess = false;
+		FString Detail;
+		if (TryParseAdvancedResult(Message.RightChop(OptionResultMarker.Len()), MessageGeneration, RequestId, bSuccess, Detail) &&
+			MessageGeneration == LoadGeneration && RequestId == PendingOptionRequestId && RuntimeState == EEChartsRuntimeState::Ready)
+		{
+			PendingOptionRequestId = 0;
+			bOptionReplayPending = !bSuccess;
+			if (bSuccess)
+			{
+				EffectiveTemplate = FEChartsWidgetJavascript::TemplateName(EEChartsTemplate::CustomOption);
+				CancelAutoApply();
+			}
+			OnOptionApplied.Broadcast(bSuccess, Detail);
+		}
+		return;
+	}
+
+	if (Message.StartsWith(InteractionResultMarker))
+	{
+		uint64 MessageGeneration = 0;
+		uint64 RequestId = 0;
+		bool bSuccess = false;
+		FString Detail;
+		if (TryParseAdvancedResult(Message.RightChop(InteractionResultMarker.Len()), MessageGeneration, RequestId, bSuccess, Detail) &&
+			MessageGeneration == LoadGeneration && RequestId == PendingInteractionRequestId && RuntimeState == EEChartsRuntimeState::Ready)
+		{
+			PendingInteractionRequestId = 0;
+			bInteractionReplayPending = !bSuccess;
+			OnInteractionModeApplied.Broadcast(InteractionMode, bSuccess, Detail);
+		}
+		return;
+	}
+
+	if (Message.StartsWith(JavaScriptResultMarker))
+	{
+		uint64 MessageGeneration = 0;
+		uint64 RequestId = 0;
+		bool bSuccess = false;
+		FString Detail;
+		if (TryParseAdvancedResult(Message.RightChop(JavaScriptResultMarker.Len()), MessageGeneration, RequestId, bSuccess, Detail) &&
+			MessageGeneration == LoadGeneration && PendingJavaScriptRequests.Remove(RequestId) > 0 &&
+			RuntimeState == EEChartsRuntimeState::Ready)
+		{
+			OnJavaScriptResult.Broadcast(static_cast<int64>(RequestId), bSuccess, Detail);
 		}
 		return;
 	}
@@ -820,22 +1038,7 @@ FString FEChartsWidgetJavascript::BuildRenderCommand(
 
 FString FEChartsWidgetJavascript::BuildApplyDataCommand(const FString& PayloadBase64)
 {
-	if (PayloadBase64.IsEmpty())
-	{
-		return FString();
-	}
-	for (const TCHAR Character : PayloadBase64)
-	{
-		const bool bBase64Character =
-			(Character >= TEXT('A') && Character <= TEXT('Z')) ||
-			(Character >= TEXT('a') && Character <= TEXT('z')) ||
-			(Character >= TEXT('0') && Character <= TEXT('9')) ||
-			Character == TEXT('+') || Character == TEXT('/') || Character == TEXT('=');
-		if (!bBase64Character)
-		{
-			return FString();
-		}
-	}
+	if (!IsStrictBase64(PayloadBase64)) return FString();
 	return FString::Printf(
 		TEXT("window.UEEChartsHost.applyDataBase64(\"%s\");"),
 		*PayloadBase64);
@@ -847,6 +1050,35 @@ FString FEChartsWidgetJavascript::BuildApplyStreamDeltaCommand(const FString& Pa
 	return FullCommand.IsEmpty()
 		? FString()
 		: FString::Printf(TEXT("window.UEEChartsHost.applyStreamDeltaBase64(\"%s\");"), *PayloadBase64);
+}
+
+FString FEChartsWidgetJavascript::BuildApplyOptionCommand(const uint64 RequestId, const FString& PayloadBase64)
+{
+	if (RequestId == 0 || RequestId > 9007199254740991ULL || !IsStrictBase64(PayloadBase64)) return FString();
+	return FString::Printf(
+		TEXT("window.UEEChartsHost.applyOptionBase64(%llu,\"%s\");"),
+		RequestId,
+		*PayloadBase64);
+}
+
+FString FEChartsWidgetJavascript::BuildSetInteractionModeCommand(
+	const uint64 RequestId,
+	const EEChartsInteractionMode InteractionMode)
+{
+	if (RequestId == 0 || RequestId > 9007199254740991ULL) return FString();
+	return FString::Printf(
+		TEXT("window.UEEChartsHost.setInteractionMode(%llu,\"%s\");"),
+		RequestId,
+		*InteractionModeName(InteractionMode));
+}
+
+FString FEChartsWidgetJavascript::BuildExecuteJavaScriptCommand(const uint64 RequestId, const FString& PayloadBase64)
+{
+	if (RequestId == 0 || RequestId > 9007199254740991ULL || !IsStrictBase64(PayloadBase64)) return FString();
+	return FString::Printf(
+		TEXT("window.UEEChartsHost.executeJavaScriptBase64(%llu,\"%s\");"),
+		RequestId,
+		*PayloadBase64);
 }
 
 void UEChartsWidget::BindConsoleMessage()

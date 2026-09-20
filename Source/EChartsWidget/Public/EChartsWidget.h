@@ -45,6 +45,9 @@ public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEChartsWarning, const FString&, Message);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEChartsError, const FString&, Message);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEChartsApplied, int64, Revision, int32, PointCount);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInteractionModeApplied, EEChartsInteractionMode, Mode, bool, bSuccess, const FString&, Message);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnOptionApplied, bool, bSuccess, const FString&, Message);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnJavaScriptResult, int64, RequestId, bool, bSuccess, const FString&, Message);
 
 	UEChartsWidget(const FObjectInitializer& ObjectInitializer);
 
@@ -108,6 +111,21 @@ public:
 	void InitializeECharts(
 		EEChartsTemplate Template = EEChartsTemplate::SegmentedAreaLine,
 		EEChartsInteractionMode InInteractionMode = EEChartsInteractionMode::ClickOnly);
+
+	/** Changes ECharts interaction behavior immediately when Ready, or caches it for the next Ready generation. */
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Advanced", meta = (DisplayName = "Set Interaction Mode"))
+	void SetInteractionMode(EEChartsInteractionMode Mode);
+
+	/**
+	 * Validates and caches an ECharts option object encoded as JSON, then selects CustomOption.
+	 * JSON functions are intentionally unsupported; use Execute ECharts JavaScript for explicitly approved raw scripts.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Advanced", meta = (DisplayName = "Set ECharts Option JSON"))
+	bool SetEChartsOptionJSON(const FString& OptionJson);
+
+	/** Executes uncached raw JavaScript only while Ready. The script receives chart, echarts, and host arguments. */
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Advanced", meta = (DisplayName = "Execute ECharts JavaScript"))
+	bool ExecuteEChartsJavaScript(const FString& JavaScript, int64& OutRequestId);
 
 	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Add Data Point"))
 	bool AddDataPoint(int32 SeriesIndex, double X, double Y);
@@ -221,6 +239,15 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
 	FOnEChartsApplied OnEChartsApplied;
 
+	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
+	FOnInteractionModeApplied OnInteractionModeApplied;
+
+	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
+	FOnOptionApplied OnOptionApplied;
+
+	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
+	FOnJavaScriptResult OnJavaScriptResult;
+
 	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 	virtual void BeginDestroy() override;
 
@@ -255,6 +282,13 @@ public:
 	void AcknowledgeRevisionForTesting(int64 Revision);
 	void SetDataRevisionForTesting(int64 Revision) { DataRevision = Revision; }
 	uint32 GetNumericStreamAllocatedBytesForTesting() const { return SeriesData[0].Numeric2D.GetAllocatedSize(); }
+	const FString& GetCachedOptionBase64ForTesting() const { return CachedOptionBase64; }
+	int32 GetPendingAdvancedRequestCountForTesting() const
+	{
+		return PendingJavaScriptRequests.Num() + (PendingOptionRequestId > 0 ? 1 : 0) + (PendingInteractionRequestId > 0 ? 1 : 0);
+	}
+	int64 GetPendingOptionRequestIdForTesting() const { return static_cast<int64>(PendingOptionRequestId); }
+	int64 GetPendingInteractionRequestIdForTesting() const { return static_cast<int64>(PendingInteractionRequestId); }
 #endif
 
 protected:
@@ -275,6 +309,10 @@ private:
 	void SubmitLatestData();
 	void ScheduleAutoApply();
 	void CancelAutoApply();
+	uint64 AllocateAdvancedRequestId();
+	void SendCachedOption();
+	void SendInteractionMode();
+	void ClearPendingAdvancedRequests();
 	int32 GetTotalPointCount() const;
 	void StopDataTableLoad(bool bNotify);
 	void FailDataTableLoad(const FString& Error);
@@ -338,6 +376,13 @@ private:
 	bool bApplyRequested = false;
 	double LastSubmitSeconds = 0.0;
 	FTSTicker::FDelegateHandle AutoApplyTickerHandle;
+	FString CachedOptionBase64;
+	uint64 NextAdvancedRequestId = 0;
+	uint64 PendingOptionRequestId = 0;
+	uint64 PendingInteractionRequestId = 0;
+	TSet<uint64> PendingJavaScriptRequests;
+	bool bOptionReplayPending = false;
+	bool bInteractionReplayPending = false;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
 	int32 DataTableWorkerSnapshotPointCountForTesting = 0;
@@ -364,6 +409,9 @@ public:
 		const FString& PayloadJson);
 	static FString BuildApplyDataCommand(const FString& PayloadBase64);
 	static FString BuildApplyStreamDeltaCommand(const FString& PayloadBase64);
+	static FString BuildApplyOptionCommand(uint64 RequestId, const FString& PayloadBase64);
+	static FString BuildSetInteractionModeCommand(uint64 RequestId, EEChartsInteractionMode InteractionMode);
+	static FString BuildExecuteJavaScriptCommand(uint64 RequestId, const FString& PayloadBase64);
 };
 
 class ECHARTSWIDGET_API FEChartsWidgetResourceLocator
