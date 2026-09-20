@@ -1100,12 +1100,17 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				EffectiveTemplate = FEChartsWidgetJavascript::TemplateName(EEChartsTemplate::CustomOption);
 				CancelAutoApply();
 			}
-			OnOptionApplied.Broadcast(bSuccess, Detail);
 			if (bWasReplayPrerequisite && !bSuccess)
 			{
+				const uint64 TerminalGeneration = LoadGeneration;
 				PendingOptionBase64.Reset();
 				bOptionBarrierActive = false;
 				bOptionBarrierChainCommitted = false;
+				bReplayBeforePendingCandidate = false;
+				bInFlightOptionReplayPrerequisite = false;
+				++PayloadBuildRequest;
+				bPayloadBuildInFlight = false;
+				CancelAutoApply();
 				RuntimeState = EEChartsRuntimeState::Error;
 				LastError = TEXT("Could not restore the last successful CustomOption before applying the pending option.");
 				if (IsStreamingActive()) { StopStreaming(false); StreamState = EEChartsDataTableStreamState::Error; }
@@ -1113,9 +1118,13 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				{
 					StopDataTableLoad(false); DataTableLoadState = EEChartsDataTableLoadState::Error; LastDataTableError = LastError;
 				}
+				CancelAutoApply();
+				OnOptionApplied.Broadcast(false, Detail);
+				if (LoadGeneration != TerminalGeneration || RuntimeState != EEChartsRuntimeState::Error) return;
 				OnEChartsError.Broadcast(LastError);
 				return;
 			}
+			OnOptionApplied.Broadcast(bSuccess, Detail);
 			if (!Detail.Contains(TEXT("rollback failed:")))
 			{
 				if (bOptionBarrierActive && bWasCandidate && PendingOptionBase64.IsEmpty() && PendingOptionRequestId == 0)

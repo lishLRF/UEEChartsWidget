@@ -153,6 +153,12 @@ public:
 	{
 		++ErrorCount;
 		LastError = Message;
+		if (ErrorInitializeWidget.IsValid())
+		{
+			UEChartsWidget* Widget = ErrorInitializeWidget.Get();
+			ErrorInitializeWidget.Reset();
+			Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+		}
 	}
 
 	UFUNCTION()
@@ -176,6 +182,12 @@ public:
 		++OptionResultCount;
 		bLastOptionSuccess = bSuccess;
 		LastAdvancedMessage = Message;
+		if (!bSuccess && OptionFailureInitializeWidget.IsValid())
+		{
+			UEChartsWidget* Widget = OptionFailureInitializeWidget.Get();
+			OptionFailureInitializeWidget.Reset();
+			Widget->InitializeECharts(OptionFailureInitializeTemplate, EEChartsInteractionMode::ClickOnly);
+		}
 	}
 
 	UFUNCTION()
@@ -212,6 +224,9 @@ public:
 	bool bLastJavaScriptSuccess = false;
 	EEChartsInteractionMode LastInteractionMode = EEChartsInteractionMode::ClickOnly;
 	FString LastAdvancedMessage;
+	TWeakObjectPtr<UEChartsWidget> OptionFailureInitializeWidget;
+	EEChartsTemplate OptionFailureInitializeTemplate = EEChartsTemplate::Bar3DHeightMap;
+	TWeakObjectPtr<UEChartsWidget> ErrorInitializeWidget;
 	int32 DataOptionReportCount = 0;
 	bool bLastDataOptionSucceeded = false;
 	int32 SeriesCountReportCount = 0;

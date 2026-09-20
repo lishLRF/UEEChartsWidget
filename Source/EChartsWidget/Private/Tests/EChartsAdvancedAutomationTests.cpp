@@ -860,6 +860,55 @@ bool FEChartsAdvancedReleaseAndCoalescingTest::RunTest(const FString& Parameters
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsPrerequisiteFailureReentrancyTest,
+	"EChartsWidget.Advanced.PrerequisiteFailureReentrancy", EChartsAdvancedTests::Flags)
+bool FEChartsPrerequisiteFailureReentrancyTest::RunTest(const FString& Parameters)
+{
+	auto ReachPrerequisiteReplay = [this](UEChartsWidget* Widget, UEChartsWidgetTestSink* Sink)
+	{
+		Widget->OnOptionApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleOptionApplied);
+		Widget->OnEChartsError.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleError);
+		Widget->InitializeECharts(); Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+		TestTrue(TEXT("Reentrant chain A accepted"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"A\"}}")));
+		TestTrue(TEXT("Reentrant chain B queued"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"B\"}}")));
+		const int64 ARequest = Widget->GetPendingOptionRequestIdForTesting();
+		Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:CustomOption applied"), ARequest), FString(), 0);
+		Widget->ReleaseSlateResources(false); Widget->PrepareRebuildForTesting();
+		Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+		return Widget->GetPendingOptionRequestIdForTesting();
+	};
+
+	UEChartsWidget* OptionWidget = EChartsAdvancedTests::MakeWidget();
+	UEChartsWidgetTestSink* OptionSink = NewObject<UEChartsWidgetTestSink>(); OptionSink->AddToRoot();
+	const int64 OptionReplay = ReachPrerequisiteReplay(OptionWidget, OptionSink);
+	OptionSink->OptionFailureInitializeWidget = OptionWidget;
+	OptionSink->OptionFailureInitializeTemplate = EEChartsTemplate::Bar3DHeightMap;
+	OptionWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:2:%lld:0:prerequisite failed; previous chart restored"), OptionReplay), FString(), 0);
+	TestEqual(TEXT("OnOptionApplied reentry keeps the new generation Loading"), OptionWidget->RuntimeState, EEChartsRuntimeState::Loading);
+	TestEqual(TEXT("OnOptionApplied reentry keeps the requested template"), OptionWidget->CurrentTemplate, EEChartsTemplate::Bar3DHeightMap);
+	TestTrue(TEXT("Old prerequisite handler does not publish stale LastError"), OptionWidget->LastError.IsEmpty());
+	TestEqual(TEXT("Old prerequisite handler does not broadcast stale OnEChartsError"), OptionSink->ErrorCount, 0);
+	OptionWidget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_ERROR__:2:stale terminal"), FString(), 0);
+	TestEqual(TEXT("Old generation terminal marker remains ignored"), OptionSink->ErrorCount, 0);
+	OptionWidget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
+	TestEqual(TEXT("Reentrant generation can become Ready"), OptionWidget->RuntimeState, EEChartsRuntimeState::Ready);
+	EChartsAdvancedTests::DestroyWidget(OptionWidget); OptionSink->RemoveFromRoot();
+
+	UEChartsWidget* ErrorWidget = EChartsAdvancedTests::MakeWidget();
+	UEChartsWidgetTestSink* ErrorSink = NewObject<UEChartsWidgetTestSink>(); ErrorSink->AddToRoot();
+	const int64 ErrorReplay = ReachPrerequisiteReplay(ErrorWidget, ErrorSink);
+	ErrorSink->ErrorInitializeWidget = ErrorWidget;
+	ErrorWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:2:%lld:0:prerequisite failed; previous chart restored"), ErrorReplay), FString(), 0);
+	TestEqual(TEXT("OnEChartsError broadcasts exactly once before reentry"), ErrorSink->ErrorCount, 1);
+	TestEqual(TEXT("OnEChartsError reentry keeps new generation Loading"), ErrorWidget->RuntimeState, EEChartsRuntimeState::Loading);
+	TestTrue(TEXT("OnEChartsError reentry clears old LastError"), ErrorWidget->LastError.IsEmpty());
+	ErrorWidget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
+	TestEqual(TEXT("OnEChartsError reentrant generation can become Ready"), ErrorWidget->RuntimeState, EEChartsRuntimeState::Ready);
+	TestEqual(TEXT("OnEChartsError is not duplicated after reentry"), ErrorSink->ErrorCount, 1);
+	EChartsAdvancedTests::DestroyWidget(ErrorWidget); ErrorSink->RemoveFromRoot();
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierSimpleSourcesTest,
 	"EChartsWidget.Advanced.OptionBarrierSimpleSources", EChartsAdvancedTests::Flags)
 bool FEChartsOptionBarrierSimpleSourcesTest::RunTest(const FString& Parameters)
