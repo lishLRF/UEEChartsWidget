@@ -333,19 +333,36 @@
         } catch (error) {
           let detail = error && error.message ? error.message : String(error);
           if (chartMutationAttempted) {
+            const cleanupErrors = [];
+            const damagedChart = chart;
             try {
               chart.clear();
               chart.setOption(chartSnapshot, { notMerge: true, lazyUpdate: false });
-              // ECharts can leave its main-process guard wedged after a throwing setOption.
-              // Recreate the instance so the restored snapshot is backed by a healthy model.
+            } catch (oldRestoreError) {
+              cleanupErrors.push('old restore: ' + (oldRestoreError && oldRestoreError.message ? oldRestoreError.message : String(oldRestoreError)));
+            }
+            try {
               chart.dispose();
-              chart = window.echarts.init(chartElement, null, { renderer: 'canvas' });
+            } catch (disposeError) {
+              cleanupErrors.push('old dispose: ' + (disposeError && disposeError.message ? disposeError.message : String(disposeError)));
+            }
+            try {
+              if (typeof window.echarts.dispose === 'function') window.echarts.dispose(chartElement);
+            } catch (globalDisposeError) {
+              cleanupErrors.push('global dispose: ' + (globalDisposeError && globalDisposeError.message ? globalDisposeError.message : String(globalDisposeError)));
+            }
+            try {
+              // A throwing setOption can wedge the old instance's main-process guard.
+              const recoveredChart = window.echarts.init(chartElement, null, { renderer: 'canvas' });
+              if (recoveredChart === damagedChart) throw new Error('ECharts returned the damaged chart instance');
+              chart = recoveredChart;
               chart.setOption(chartSnapshot, { notMerge: true, lazyUpdate: false });
               currentOption = optionSnapshot;
               templateBaseOption = templateSnapshot;
               currentPayload = payloadSnapshot;
               currentEffectiveTemplate = effectiveTemplateSnapshot;
               currentInteractionMode = interactionModeSnapshot;
+              if (cleanupErrors.length > 0) detail += '; recovery cleanup: ' + cleanupErrors.join(' | ');
               detail += '; previous chart restored';
             } catch (rollbackError) {
               const rollbackDetail = rollbackError && rollbackError.message ? rollbackError.message : String(rollbackError);

@@ -103,7 +103,11 @@ void UEChartsWidget::SortStreamRowNames(const uint64 Request)
 			W->DataTableSnapshot->Rows.Reset();
 			W->DataTableSnapshot->bSortKeysReady = true;
 			W->DataTableLoadState = EEChartsDataTableLoadState::Reading;
-			if (!W->bStreamingSuspended && !W->DataTableTickerHandle.IsValid())
+			if (W->bOptionBarrierActive)
+			{
+				W->SendPendingOrCachedOption();
+			}
+			else if (!W->bStreamingSuspended && !W->DataTableTickerHandle.IsValid())
 			{
 				W->DataTableTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 					FTickerDelegate::CreateWeakLambda(W, [W, Request](float) { return W->ReadDataTableBatch(Request); }),
@@ -180,7 +184,7 @@ void UEChartsWidget::CancelStreamTicker()
 
 void UEChartsWidget::ScheduleStreamTicker()
 {
-	if (bStreamingSuspended || StreamState != EEChartsDataTableStreamState::Playing || StreamFinalRevision ||
+	if (bStreamingSuspended || bOptionBarrierActive || StreamState != EEChartsDataTableStreamState::Playing || StreamFinalRevision ||
 		StreamTickerHandle.IsValid() || (InFlightRevision != 0 && PendingStreamDeltas.Num() >= 2)) return;
 	const uint64 Request = StreamRequest;
 	StreamTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
@@ -363,6 +367,7 @@ void UEChartsWidget::ResumeStreamingAfterRebuild()
 {
 	if (!bStreamingSuspended) return;
 	bStreamingSuspended = false;
+	if (bOptionBarrierActive) return;
 	if (DataTableSnapshot && DataTableSnapshot->bStreaming && DataTableLoadState == EEChartsDataTableLoadState::Reading &&
 		!DataTableTickerHandle.IsValid())
 	{

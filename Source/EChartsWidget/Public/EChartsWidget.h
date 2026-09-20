@@ -316,6 +316,8 @@ private:
 	uint64 AllocateAdvancedRequestId();
 	void SendOptionBase64(const FString& OptionBase64, bool bCandidate);
 	void SendPendingOrCachedOption();
+	void BeginOptionBarrier();
+	void ResolveOptionBarrier(bool bCommit);
 	void SendInteractionMode();
 	void ClearPendingAdvancedRequests(bool bPreserveOptionCandidate);
 	int32 GetTotalPointCount() const;
@@ -392,8 +394,12 @@ private:
 	uint64 PendingInteractionRequestId = 0;
 	TSet<uint64> PendingJavaScriptRequests;
 	bool bInFlightOptionIsCandidate = false;
+	EEChartsInteractionMode InFlightInteractionMode = EEChartsInteractionMode::ClickOnly;
+	bool bInteractionModeQueued = false;
 	bool bOptionReplayPending = false;
 	bool bInteractionReplayPending = false;
+	bool bOptionBarrierActive = false;
+	bool bOptionBarrierResumeDataTable = false;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
 	int32 DataTableWorkerSnapshotPointCountForTesting = 0;

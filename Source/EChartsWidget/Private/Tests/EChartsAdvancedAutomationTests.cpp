@@ -2,6 +2,7 @@
 
 #include "EChartsWidget.h"
 #include "EChartsWidgetTestSink.h"
+#include "EChartsDataTableTestRow.h"
 
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
@@ -337,6 +338,63 @@ namespace EChartsAdvancedTests
 		TSharedRef<FOptionRollbackCEFState> State;
 		FAutomationTestBase* Test;
 	};
+
+	class FOptionBarrierStreamCommand final : public IAutomationLatentCommand
+	{
+	public:
+		explicit FOptionBarrierStreamCommand(FAutomationTestBase* InTest) : Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (!Widget)
+			{
+				Deadline = FPlatformTime::Seconds() + 15.0;
+				Widget = MakeWidget(); Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+				Widget->OnDataTableStreamingStopped.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleStreamStopped);
+				Widget->InitializeECharts(); Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+				UDataTable* Table = NewObject<UDataTable>(); Table->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+				for (int32 I = 0; I < 50; ++I) { FEChartsDataTableTestRow Row; Row.X = I; Row.Y = I; Table->AddRow(FName(*FString::FromInt(I)), Row); }
+				FEChartsDataTableMapping Mapping; Mapping.X = TEXT("X"); Mapping.Y = TEXT("Y");
+				Widget->SetDataTableMapping(Table, Mapping); Widget->SetTimeSeriesEnabled(true); Widget->SetTimeSeriesWindow(10);
+				Test->TestTrue(TEXT("Barrier stream starts"), Widget->StartDataTableStreaming(0.01f, 1, true, 50));
+				return false;
+			}
+			if (FPlatformTime::Seconds() >= Deadline) { Test->AddError(TEXT("Option barrier stream timeout")); Cleanup(); return true; }
+			if (Stage == 0 && Widget->StreamState == EEChartsDataTableStreamState::Playing && Widget->StreamedRows > 0)
+			{
+				if (Widget->IsApplyInFlightForTesting()) Widget->AcknowledgeCurrentApplyForTesting();
+				SavedRows = Widget->StreamedRows;
+				Test->TestTrue(TEXT("Playing stream candidate accepted"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"candidate\"}}")));
+				Test->TestEqual(TEXT("Candidate barrier preserves Playing state"), Widget->StreamState, EEChartsDataTableStreamState::Playing);
+				Test->TestEqual(TEXT("Candidate barrier emits no Stopped event"), Sink->StreamStoppedCount, 0);
+				Test->TestFalse(TEXT("Candidate barrier pauses stream ticker"), Widget->IsDataTableStreamScheduledForTesting());
+				if (Widget->IsApplyInFlightForTesting()) Widget->AcknowledgeCurrentApplyForTesting();
+				const int64 Request = Widget->GetPendingOptionRequestIdForTesting();
+				Test->TestTrue(TEXT("Candidate waits for and crosses the data ACK boundary"), Request > 0);
+				Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:0:failed; previous chart restored"), Request), FString(), 0);
+				Test->TestEqual(TEXT("Failed candidate restores Playing state"), Widget->StreamState, EEChartsDataTableStreamState::Playing);
+				Test->TestEqual(TEXT("Failed candidate emits no Stopped event"), Sink->StreamStoppedCount, 0);
+				Stage = 1; return false;
+			}
+			if (Stage == 1)
+			{
+				if (Widget->IsApplyInFlightForTesting()) Widget->AcknowledgeCurrentApplyForTesting();
+				if (Widget->StreamedRows > SavedRows) { Cleanup(); return true; }
+			}
+			return false;
+		}
+	private:
+		void Cleanup()
+		{
+			if (Widget) { Widget->StopDataTableStreaming(); DestroyWidget(Widget); Widget = nullptr; }
+			if (Sink) { Sink->RemoveFromRoot(); Sink = nullptr; }
+		}
+		FAutomationTestBase* Test;
+		UEChartsWidget* Widget = nullptr;
+		UEChartsWidgetTestSink* Sink = nullptr;
+		double Deadline = 0.0;
+		int32 Stage = 0;
+		int64 SavedRows = 0;
+	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAdvancedReflectionTest,
@@ -506,6 +564,123 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAdvancedReleaseAndCoalescingTest,
+	"EChartsWidget.Advanced.ReleaseCandidatesAndInteractionCoalescing", EChartsAdvancedTests::Flags)
+bool FEChartsAdvancedReleaseAndCoalescingTest::RunTest(const FString& Parameters)
+{
+	auto ExerciseRelease = [this](const bool bQueueNewer)
+	{
+		UEChartsWidget* Widget = EChartsAdvancedTests::MakeWidget();
+		UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+		Widget->OnOptionApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleOptionApplied);
+		Widget->InitializeECharts();
+		Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+		const int64 InitialInteraction = Widget->GetPendingInteractionRequestIdForTesting();
+		Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:1:%lld:1:ClickOnly"), InitialInteraction), FString(), 0);
+		TestTrue(TEXT("Candidate A accepted"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"A\"}}")));
+		const int64 OldRequest = Widget->GetPendingOptionRequestIdForTesting();
+		if (bQueueNewer) TestTrue(TEXT("Candidate B accepted"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"B\"}}")));
+		const FString Latest = Widget->GetPendingOptionBase64ForTesting();
+		Widget->ReleaseSlateResources(false);
+		Widget->PrepareRebuildForTesting();
+		Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:stale"), OldRequest), FString(), 0);
+		TestEqual(TEXT("Old candidate ACK ignored after rebuild"), Sink->OptionResultCount, 0);
+		Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+		const int64 NewRequest = Widget->GetPendingOptionRequestIdForTesting();
+		TestTrue(TEXT("Latest candidate survives Release/Rebuild"), NewRequest > 0);
+		TestEqual(TEXT("Rebuild sends exactly the latest candidate"), Widget->GetPendingOptionBase64ForTesting(), Latest);
+		Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:2:%lld:1:CustomOption applied"), NewRequest), FString(), 0);
+		TestEqual(TEXT("Candidate commits exactly once"), Sink->OptionResultCount, 1);
+		TestEqual(TEXT("Committed cache is latest candidate"), Widget->GetCachedOptionBase64ForTesting(), Latest);
+		EChartsAdvancedTests::DestroyWidget(Widget); Sink->RemoveFromRoot();
+	};
+	ExerciseRelease(false);
+	ExerciseRelease(true);
+
+	UEChartsWidget* Widget = EChartsAdvancedTests::MakeWidget();
+	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+	Widget->OnInteractionModeApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleInteractionModeApplied);
+	Widget->InitializeECharts(); Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	const int64 Initial = Widget->GetPendingInteractionRequestIdForTesting();
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:1:%lld:1:ClickOnly"), Initial), FString(), 0);
+	Sink->InteractionResultCount = 0;
+	Widget->SetInteractionMode(EEChartsInteractionMode::Disabled);
+	const int64 First = Widget->GetPendingInteractionRequestIdForTesting();
+	Widget->SetInteractionMode(EEChartsInteractionMode::FullHover);
+	Widget->SetInteractionMode(EEChartsInteractionMode::ClickOnly);
+	TestEqual(TEXT("Rapid interaction changes keep one request in flight"), Widget->GetPendingInteractionRequestIdForTesting(), First);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:1:%lld:1:Disabled"), First), FString(), 0);
+	TestEqual(TEXT("First interaction ACK broadcasts once"), Sink->InteractionResultCount, 1);
+	TestEqual(TEXT("First interaction event reports applied mode"), Sink->LastInteractionMode, EEChartsInteractionMode::Disabled);
+	const int64 LatestRequest = Widget->GetPendingInteractionRequestIdForTesting();
+	TestTrue(TEXT("Latest interaction is sent after current ACK"), LatestRequest != 0 && LatestRequest != First);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:1:%lld:1:ClickOnly"), LatestRequest), FString(), 0);
+	TestEqual(TEXT("Coalesced interaction emits exactly two results"), Sink->InteractionResultCount, 2);
+	TestEqual(TEXT("Final interaction mode is latest"), Sink->LastInteractionMode, EEChartsInteractionMode::ClickOnly);
+	Widget->SetInteractionMode(EEChartsInteractionMode::Disabled);
+	const int64 PreReleaseRequest = Widget->GetPendingInteractionRequestIdForTesting();
+	Widget->SetInteractionMode(EEChartsInteractionMode::FullHover);
+	Widget->ReleaseSlateResources(false); Widget->PrepareRebuildForTesting();
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:1:%lld:1:stale"), PreReleaseRequest), FString(), 0);
+	TestEqual(TEXT("Release ignores old interaction ACK"), Sink->InteractionResultCount, 2);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	const int64 ReplayedInteraction = Widget->GetPendingInteractionRequestIdForTesting();
+	TestTrue(TEXT("Release replays the latest interaction mode"), ReplayedInteraction > 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:2:%lld:1:FullHover"), ReplayedInteraction), FString(), 0);
+	TestEqual(TEXT("Latest interaction replay broadcasts once"), Sink->InteractionResultCount, 3);
+	TestEqual(TEXT("Latest interaction survives Release"), Sink->LastInteractionMode, EEChartsInteractionMode::FullHover);
+	EChartsAdvancedTests::DestroyWidget(Widget); Sink->RemoveFromRoot();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierSimpleSourcesTest,
+	"EChartsWidget.Advanced.OptionBarrierSimpleSources", EChartsAdvancedTests::Flags)
+bool FEChartsOptionBarrierSimpleSourcesTest::RunTest(const FString& Parameters)
+{
+	UEChartsWidget* AutoWidget = EChartsAdvancedTests::MakeWidget();
+	AutoWidget->InitializeECharts(); AutoWidget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	AutoWidget->SetAutoApplyEnabled(true, 10.0f); AutoWidget->AddDataPoint(0, 1, 1);
+	TestTrue(TEXT("Auto apply scheduled before candidate"), AutoWidget->IsAutoApplyScheduledForTesting());
+	TestTrue(TEXT("Auto candidate accepted"), AutoWidget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"candidate\"}}")));
+	const int64 AutoRequest = AutoWidget->GetPendingOptionRequestIdForTesting();
+	TestFalse(TEXT("Candidate barrier pauses auto apply"), AutoWidget->IsAutoApplyScheduledForTesting());
+	AutoWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:0:failed; previous chart restored"), AutoRequest), FString(), 0);
+	TestTrue(TEXT("Candidate failure preserves auto apply setting"), AutoWidget->bAutoApplyEnabled);
+	TestTrue(TEXT("Candidate failure reschedules dirty auto apply"), AutoWidget->IsAutoApplyScheduledForTesting());
+	EChartsAdvancedTests::DestroyWidget(AutoWidget);
+
+	UEChartsWidget* TableWidget = EChartsAdvancedTests::MakeWidget();
+	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+	TableWidget->OnDataTableLoadCancelled.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleTableCancelled);
+	TableWidget->InitializeECharts(); TableWidget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	UDataTable* Table = NewObject<UDataTable>(); Table->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+	for (int32 I = 0; I < 20; ++I) { FEChartsDataTableTestRow Row; Row.X = I; Row.Y = I; Table->AddRow(FName(*FString::FromInt(I)), Row); }
+	FEChartsDataTableMapping Mapping; Mapping.X = TEXT("X"); Mapping.Y = TEXT("Y");
+	TestTrue(TEXT("Barrier table maps"), TableWidget->SetDataTableMapping(Table, Mapping)); TableWidget->LoadDataTable(1);
+	TestTrue(TEXT("DataTable reading ticker starts"), TableWidget->IsDataTablePrepareScheduledForTesting());
+	TestTrue(TEXT("DataTable candidate accepted"), TableWidget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"candidate\"}}")));
+	const int64 TableRequest = TableWidget->GetPendingOptionRequestIdForTesting();
+	TestEqual(TEXT("Candidate barrier preserves DataTable Reading state"), TableWidget->DataTableLoadState, EEChartsDataTableLoadState::Reading);
+	TestEqual(TEXT("Candidate barrier does not broadcast cancellation"), Sink->TableCancelledCount, 0);
+	TestFalse(TEXT("Candidate barrier pauses DataTable ticker"), TableWidget->IsDataTablePrepareScheduledForTesting());
+	TableWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:0:failed; previous chart restored"), TableRequest), FString(), 0);
+	TestEqual(TEXT("Candidate failure restores DataTable Reading"), TableWidget->DataTableLoadState, EEChartsDataTableLoadState::Reading);
+	TestEqual(TEXT("Candidate failure emits no cancellation"), Sink->TableCancelledCount, 0);
+	TestTrue(TEXT("Candidate failure resumes DataTable ticker"), TableWidget->IsDataTablePrepareScheduledForTesting());
+	FTSTicker::GetCoreTicker().Tick(0.01f);
+	TestTrue(TEXT("Resumed DataTable continues reading"), TableWidget->RowsProcessed > 0);
+	EChartsAdvancedTests::DestroyWidget(TableWidget); Sink->RemoveFromRoot();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierPlayingStreamTest,
+	"EChartsWidget.Advanced.OptionBarrierPlayingStream", EChartsAdvancedTests::Flags)
+bool FEChartsOptionBarrierPlayingStreamTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionBarrierStreamCommand(this));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCustomOptionDataContinuityTest,
 	"EChartsWidget.Advanced.CustomOptionDataContinuity", EChartsAdvancedTests::Flags)
 bool FEChartsCustomOptionDataContinuityTest::RunTest(const FString& Parameters)
@@ -518,8 +693,9 @@ bool FEChartsCustomOptionDataContinuityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("CustomOption preserves cached series points"), Widget->GetSeriesData(0).Num(), 2);
 	Widget->InitializeECharts(EEChartsTemplate::CustomOption, EEChartsInteractionMode::ClickOnly);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
-	TestTrue(TEXT("Cached data is safely submitted after CustomOption replay"), Widget->IsApplyInFlightForTesting());
-	Widget->AcknowledgeCurrentApplyForTesting();
+	TestFalse(TEXT("Candidate barrier prevents cached data overtaking CustomOption"), Widget->IsApplyInFlightForTesting());
+	const int64 OptionRequest = Widget->GetPendingOptionRequestIdForTesting();
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:CustomOption applied"), OptionRequest), FString(), 0);
 	TestTrue(TEXT("Add remains usable after CustomOption"), Widget->AddDataPoint(0, 5.0, 6.0));
 	Widget->ApplyEChartsChanges();
 	TestTrue(TEXT("Apply remains usable after CustomOption"), Widget->IsApplyInFlightForTesting());

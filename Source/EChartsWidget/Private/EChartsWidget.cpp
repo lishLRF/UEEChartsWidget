@@ -472,6 +472,7 @@ void UEChartsWidget::SetAutoApplyEnabled(const bool bEnabled, const float InMaxU
 
 void UEChartsWidget::SubmitLatestData()
 {
+	if (bOptionBarrierActive) return;
 	if (!bIsDirty)
 	{
 		bApplyRequested = false;
@@ -533,7 +534,7 @@ void UEChartsWidget::SubmitLatestData()
 
 void UEChartsWidget::ScheduleAutoApply()
 {
-	if (!bAutoApplyEnabled || !bIsDirty || RuntimeState != EEChartsRuntimeState::Ready ||
+	if (bOptionBarrierActive || !bAutoApplyEnabled || !bIsDirty || RuntimeState != EEChartsRuntimeState::Ready ||
 		InFlightRevision != 0 || AutoApplyTickerHandle.IsValid())
 	{
 		return;
@@ -587,6 +588,7 @@ void UEChartsWidget::ClearPendingAdvancedRequests(const bool bPreserveOptionCand
 	bInFlightOptionIsCandidate = false;
 	PendingOptionRequestId = 0;
 	PendingInteractionRequestId = 0;
+	bInteractionModeQueued = false;
 	PendingJavaScriptRequests.Reset();
 }
 
@@ -607,6 +609,8 @@ void UEChartsWidget::SendPendingOrCachedOption()
 	if (RuntimeState != EEChartsRuntimeState::Ready || PendingOptionRequestId != 0) return;
 	if (!PendingOptionBase64.IsEmpty())
 	{
+		if (bOptionBarrierActive &&
+			(InFlightRevision != 0 || DataTableLoadState == EEChartsDataTableLoadState::Processing)) return;
 		const FString Candidate = MoveTemp(PendingOptionBase64);
 		PendingOptionBase64.Reset();
 		SendOptionBase64(Candidate, true);
@@ -618,10 +622,59 @@ void UEChartsWidget::SendPendingOrCachedOption()
 	}
 }
 
+void UEChartsWidget::BeginOptionBarrier()
+{
+	if (bOptionBarrierActive) return;
+	bOptionBarrierActive = true;
+	bOptionBarrierResumeDataTable = DataTableLoadState == EEChartsDataTableLoadState::Reading && DataTableSnapshot.IsValid();
+	CancelStreamTicker();
+	if (DataTableTickerHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(DataTableTickerHandle);
+		DataTableTickerHandle.Reset();
+	}
+	CancelAutoApply();
+}
+
+void UEChartsWidget::ResolveOptionBarrier(const bool bCommit)
+{
+	if (!bOptionBarrierActive) return;
+	bOptionBarrierActive = false;
+	if (bCommit)
+	{
+		if (IsStreamingActive()) StopStreaming(true);
+		else if (DataTableLoadState == EEChartsDataTableLoadState::Reading ||
+			DataTableLoadState == EEChartsDataTableLoadState::Processing ||
+			DataTableLoadState == EEChartsDataTableLoadState::Applying)
+		{
+			StopDataTableLoad(true);
+		}
+		InvalidateStreamDelta();
+		CancelAutoApply();
+		bApplyRequested = false;
+	}
+	else
+	{
+		if (bOptionBarrierResumeDataTable && DataTableLoadState == EEChartsDataTableLoadState::Reading &&
+			DataTableSnapshot.IsValid() && !DataTableTickerHandle.IsValid())
+		{
+			const uint64 Request = DataTableRequest;
+			DataTableTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+				FTickerDelegate::CreateWeakLambda(this, [this, Request](float) { return ReadDataTableBatch(Request); }), 0.0001f);
+		}
+		ScheduleStreamTicker();
+		if (bApplyRequested && RuntimeState == EEChartsRuntimeState::Ready && InFlightRevision == 0) SubmitLatestData();
+		else ScheduleAutoApply();
+	}
+	bOptionBarrierResumeDataTable = false;
+}
+
 void UEChartsWidget::SendInteractionMode()
 {
-	if (RuntimeState != EEChartsRuntimeState::Ready) return;
+	if (RuntimeState != EEChartsRuntimeState::Ready || PendingInteractionRequestId != 0) return;
 	PendingInteractionRequestId = AllocateAdvancedRequestId();
+	InFlightInteractionMode = InteractionMode;
+	bInteractionModeQueued = false;
 	bInteractionReplayPending = true;
 	ExecuteJavascript(FEChartsWidgetJavascript::BuildSetInteractionModeCommand(PendingInteractionRequestId, InteractionMode));
 }
@@ -633,7 +686,8 @@ void UEChartsWidget::SetInteractionMode(const EEChartsInteractionMode Mode)
 	bInteractionReplayPending = true;
 	if (RuntimeState == EEChartsRuntimeState::Ready)
 	{
-		SendInteractionMode();
+		if (PendingInteractionRequestId != 0) bInteractionModeQueued = InFlightInteractionMode != InteractionMode;
+		else SendInteractionMode();
 	}
 }
 
@@ -650,16 +704,7 @@ bool UEChartsWidget::SetEChartsOptionJSON(const FString& OptionJson)
 	const FString Encoded = FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
 	if (!IsStrictBase64(Encoded)) return false;
 
-	if (IsStreamingActive()) StopDataTableStreaming();
-	if (DataTableLoadState == EEChartsDataTableLoadState::Reading ||
-		DataTableLoadState == EEChartsDataTableLoadState::Processing ||
-		DataTableLoadState == EEChartsDataTableLoadState::Applying)
-	{
-		CancelDataTableLoad();
-	}
-	InvalidateStreamDelta();
-	CancelAutoApply();
-	bApplyRequested = false;
+	BeginOptionBarrier();
 	PendingOptionBase64 = Encoded;
 	if (RuntimeState == EEChartsRuntimeState::Ready)
 	{
@@ -760,14 +805,14 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 {
 	bStreamingSuspended = true;
 	CancelStreamTicker();
-	if (DataTableSnapshot && DataTableSnapshot->bStreaming)
+	if (bOptionBarrierActive || (DataTableSnapshot && DataTableSnapshot->bStreaming))
 	{
 		if (DataTableTickerHandle.IsValid()) FTSTicker::GetCoreTicker().RemoveTicker(DataTableTickerHandle);
 		DataTableTickerHandle.Reset();
 	}
 	else StopDataTableLoad(false);
 	CancelAutoApply();
-	ClearPendingAdvancedRequests(false);
+	ClearPendingAdvancedRequests(true);
 	bInteractionReplayPending = bHasInitialized;
 	bOptionReplayPending = bHasInitialized && CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (InFlightRevision != 0)
@@ -891,7 +936,11 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			CompleteStreamIfAcknowledged(MessageRevision);
 			OnEChartsApplied.Broadcast(MessageRevision, MessagePointCount);
 			if (!PendingStreamDeltas.IsEmpty()) bApplyRequested = true;
-			if (bApplyRequested && bIsDirty)
+			if (bOptionBarrierActive)
+			{
+				SendPendingOrCachedOption();
+			}
+			else if (bApplyRequested && bIsDirty)
 			{
 				SubmitLatestData();
 			}
@@ -951,7 +1000,14 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				CancelAutoApply();
 			}
 			OnOptionApplied.Broadcast(bSuccess, Detail);
-			if (!Detail.Contains(TEXT("rollback failed:"))) SendPendingOrCachedOption();
+			if (!Detail.Contains(TEXT("rollback failed:")))
+			{
+				if (bOptionBarrierActive && bWasCandidate && PendingOptionBase64.IsEmpty() && PendingOptionRequestId == 0)
+				{
+					ResolveOptionBarrier(bSuccess);
+				}
+				else SendPendingOrCachedOption();
+			}
 		}
 		return;
 	}
@@ -965,9 +1021,13 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		if (TryParseAdvancedResult(Message.RightChop(InteractionResultMarker.Len()), MessageGeneration, RequestId, bSuccess, Detail) &&
 			MessageGeneration == LoadGeneration && RequestId == PendingInteractionRequestId && RuntimeState == EEChartsRuntimeState::Ready)
 		{
+			const EEChartsInteractionMode AppliedMode = InFlightInteractionMode;
+			const bool bSendLatest = bInteractionModeQueued || AppliedMode != InteractionMode;
 			PendingInteractionRequestId = 0;
-			bInteractionReplayPending = !bSuccess;
-			OnInteractionModeApplied.Broadcast(InteractionMode, bSuccess, Detail);
+			bInteractionModeQueued = false;
+			bInteractionReplayPending = !bSuccess && !bSendLatest;
+			OnInteractionModeApplied.Broadcast(AppliedMode, bSuccess, Detail);
+			if (bSendLatest && PendingInteractionRequestId == 0) SendInteractionMode();
 		}
 		return;
 	}
@@ -1024,6 +1084,8 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				DataTableLoadState = EEChartsDataTableLoadState::Error;
 				LastDataTableError = Error;
 			}
+			bOptionBarrierActive = false;
+			bOptionBarrierResumeDataTable = false;
 			OnEChartsError.Broadcast(LastError);
 		}
 	}

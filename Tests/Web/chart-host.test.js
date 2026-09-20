@@ -229,6 +229,39 @@ test('custom option reports a terminal host error when rollback itself fails', (
   assert.ok(state.logs.some(line => line.startsWith('__UE_ECHARTS_ERROR__:7:option rollback failed:')));
 });
 
+test('custom option recreates a healthy chart when the damaged instance clear throws', () => {
+  const state = createHostContext();
+  let visibleOption = null;
+  let initCount = 0;
+  const copy = value => JSON.parse(JSON.stringify(value));
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => {
+    initCount += 1;
+    const damaged = initCount === 1;
+    return {
+      clear() { if (damaged) throw new Error('damaged clear'); visibleOption = {}; },
+      resize() {}, dispose() {}, getOption() { return copy(visibleOption || {}); },
+      setOption(option) {
+        visibleOption = copy(option);
+        if (damaged && option.title && option.title.text === 'attacker-replacement') {
+          visibleOption.series = [];
+          throw new Error('semantic apply failure');
+        }
+      },
+    };
+  };
+  vm.runInContext(hostSource, state.context);
+  const good = { title: { text: 'known-good' }, xAxis: {}, yAxis: {}, series: [{ type: 'line', data: [1, 2] }] };
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(51, encodePayload(good)), true);
+
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(52, encodePayload({ title: { text: 'attacker-replacement' } })), false);
+  assert.equal(initCount, 2);
+  assert.equal(state.window.UEEChartsHost.getOptionForTesting().title.text, 'known-good');
+  assert.equal(state.window.UEEChartsHost.getOptionForTesting().series.length, 1);
+  assert.ok(state.logs.some(line => line.includes('__UE_ECHARTS_OPTION_RESULT__:7:52:0:')));
+  assert.equal(state.logs.some(line => line.startsWith('__UE_ECHARTS_ERROR__:7:')), false);
+});
+
 test('custom option rejects arrays malformed UTF-8 and decoded payloads above 16 MiB', () => {
   const state = createHostContext();
   vm.runInContext(hostSource, state.context);
@@ -240,7 +273,7 @@ test('custom option rejects arrays malformed UTF-8 and decoded payloads above 16
   assert.equal(state.logs.filter((line) => line.startsWith('__UE_ECHARTS_OPTION_RESULT__:7:')).length, 3);
 });
 
-test('advanced JavaScript receives only chart echarts and host, ACKs success, and recovers after errors', () => {
+test('advanced JavaScript receives chart echarts and host arguments, ACKs success, and recovers after errors', () => {
   const state = createHostContext();
   let appliedOption = null;
   state.window.echarts.init = () => ({

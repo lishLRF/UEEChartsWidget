@@ -254,6 +254,7 @@ void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 			W->DataTablePayloadBase64 = MoveTemp(Payload);
 			W->DataTableLoadState = EEChartsDataTableLoadState::Applying;
 			W->ApplyEChartsChanges();
+			if (W->bOptionBarrierActive) W->SendPendingOrCachedOption();
 		});
 	});
 }
@@ -317,4 +318,5 @@ void UEChartsWidget::FailDataTableLoad(const FString& Error)
 	LastDataTableError = Error;
 	DataTableLoadState = EEChartsDataTableLoadState::Error;
 	ReportDataError(Error);
+	if (bOptionBarrierActive) SendPendingOrCachedOption();
 }
