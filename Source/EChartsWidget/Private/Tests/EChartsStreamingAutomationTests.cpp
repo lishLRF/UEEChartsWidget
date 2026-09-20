@@ -58,7 +58,7 @@ class FEChartsStreamCommand : public IAutomationLatentCommand
     TStrongObjectPtr<UEChartsWidget> W;
     TStrongObjectPtr<UEChartsWidgetTestSink> S;
     int32 Count() const { return Mode == 1 ? W->GetCategorySeriesData(0).Num() : Mode == 2 ? W->Get3DData(0).Num() : W->GetSeriesData(0).Num(); }
-    void Ack() { for (int32 R = 1; R < 100; ++R) W->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_APPLIED__:1:%d:%d"), R, Count()), FString(), 0); }
+    void Ack() { for (int32 I = 0; I < 100 && W->IsApplyInFlightForTesting(); ++I) W->AcknowledgeCurrentApplyForTesting(); }
     void Cleanup() { W->StopDataTableStreaming(); W->ReleaseSlateResources(false); }
 public:
     FEChartsStreamCommand(FAutomationTestBase* T, int32 M, bool L) : Test(T), Mode(M), bLoop(L) {}
@@ -107,6 +107,7 @@ public:
             Ack(); Test->TestEqual(TEXT("ACK does not advance paused stream"), W->StreamedRows, SavedRows);
             W->ResumeDataTableStreaming(); Stage = 3;
         }
+        if (Stage == 3 && W->StreamedRows < (bLoop ? 12 : 5)) W->AcknowledgeCurrentApplyForTesting();
         if (Stage == 3 && W->StreamedRows >= (bLoop ? 12 : 5))
         {
             Test->TestEqual(TEXT("Window bounded"), Count(), 3);
@@ -125,6 +126,8 @@ public:
             }
             Test->TestEqual(TEXT("Final completion waits for ACK"), S->StreamCompletedCount, 0);
             Test->TestEqual(TEXT("All rows appended"), W->StreamedRows, int64(5));
+            W->AcknowledgeRevisionForTesting(W->GetInFlightRevisionForTesting() + 1);
+            Test->TestEqual(TEXT("Future revision cannot complete the stream"), S->StreamCompletedCount, 0);
             Ack(); Ack();
             Test->TestEqual(TEXT("Final ACK completes once"), S->StreamCompletedCount, 1);
             Test->TestEqual(TEXT("Completed state"), W->StreamState, EEChartsDataTableStreamState::Completed);
@@ -182,6 +185,38 @@ bool FEChartsStreamingBoundariesTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Runtime failure stops preparing stream"), W->StreamState, EEChartsDataTableStreamState::Error);
     TestFalse(TEXT("Runtime failure removes preparation ticker"), W->IsDataTablePrepareScheduledForTesting());
     W->StopDataTableStreaming(); W->ReleaseSlateResources(false);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsStreamingSourceLimitTest, "EChartsWidget.Streaming.SourceLimits",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsStreamingSourceLimitTest::RunTest(const FString& Parameters)
+{
+    TStrongObjectPtr<UEChartsWidget> W(NewObject<UEChartsWidget>());
+    TStrongObjectPtr<UDataTable> T(NewObject<UDataTable>());
+    T->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+    FEChartsDataTableTestRow R;
+    for (int32 I = 0; I <= FEChartsPayloadBuilder::MaxPointCount; ++I)
+        T->AddRow(FName(*FString::FromInt(I)), R);
+    FEChartsDataTableMapping M; M.X = TEXT("X"); M.Y = TEXT("Y");
+    TestTrue(TEXT("Oversized table maps before stream-specific validation"), W->SetDataTableMapping(T.Get(), M));
+    W->SetTimeSeriesEnabled(true);
+    TestFalse(TEXT("Stream rejects more than 100000 source rows before preparation"), W->StartDataTableStreaming());
+    TestEqual(TEXT("Oversized source enters Error state"), W->StreamState, EEChartsDataTableStreamState::Error);
+    TestFalse(TEXT("Oversized source never schedules preparation"), W->IsDataTablePrepareScheduledForTesting());
+    TStrongObjectPtr<UDataTable> LongCategoryTable(NewObject<UDataTable>());
+    LongCategoryTable->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+    FEChartsDataTableTestRow LongRow;
+    LongRow.Category = FString::ChrN(FEChartsPayloadBuilder::MaxJsonBytes + 1, TEXT('A'));
+    LongCategoryTable->AddRow(TEXT("Long"), LongRow);
+    M.X = TEXT("Category");
+    TestTrue(TEXT("Long category table maps"), W->SetDataTableMapping(LongCategoryTable.Get(), M));
+    TestTrue(TEXT("Long category begins incremental validation"), W->StartDataTableStreaming(0.1f, 1, false, 1));
+    FTSTicker::GetCoreTicker().Tick(0.1f);
+    TestEqual(TEXT("Long category source fails the byte budget before prepared caching"),
+        W->StreamState, EEChartsDataTableStreamState::Error);
+    TestEqual(TEXT("Long category is never retained in prepared source"), W->GetPreparedStreamCountForTesting(), 0);
+    W->ReleaseSlateResources(false);
     return true;
 }
 
@@ -271,11 +306,13 @@ public:
         if (!W.IsValid())
         {
             Start = FPlatformTime::Seconds(); W.Reset(NewObject<UEChartsWidget>()); W->SetTimeSeriesEnabled(true);
+            W->InitializeECharts(); W->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
             UDataTable* Table = NewObject<UDataTable>(); Table->RowStruct = FEChartsDataTableTestRow::StaticStruct();
             for (int32 I = 0; I < 333; ++I) { FEChartsDataTableTestRow R; R.X = I; R.Y = I; Table->AddRow(FName(*FString::FromInt(I)), R); }
             FEChartsDataTableMapping M; M.X = TEXT("X"); M.Y = TEXT("Y"); W->SetDataTableMapping(Table, M);
             W->StartDataTableStreaming(0.01f, 256, true, 4096); return false;
         }
+        W->AcknowledgeCurrentApplyForTesting();
         if (FPlatformTime::Seconds() - Start > 15) { Test->AddError(TEXT("Loop memory test timeout")); W->StopDataTableStreaming(); return true; }
         Test->TestTrue(TEXT("Every loop callback remains within default 1000 window"), W->GetSeriesData(0).Num() <= 1000);
         if (W->LoopCount >= 10 && WarmBytes == 0) WarmBytes = W->GetNumericStreamAllocatedBytesForTesting();
@@ -283,6 +320,9 @@ public:
         Test->TestEqual(TEXT("One hundred loops use same memory as warm window"), W->GetNumericStreamAllocatedBytesForTesting(), WarmBytes);
         Test->TestEqual(TEXT("Prepared source never grows across loops"), W->GetPreparedStreamCountForTesting(), 333);
         Test->TestEqual(TEXT("Default window retains exact 1000 points"), W->GetSeriesData(0).Num(), 1000);
+        Test->TestTrue(TEXT("Physical streaming cache stays within two windows plus one batch"), W->GetStreamPhysicalPointCountForTesting() <= 2256);
+        Test->TestTrue(TEXT("Steady-state stream submission uses delta protocol"), W->WasLastSubmitDeltaForTesting());
+        Test->TestTrue(TEXT("One-batch delta command remains small"), W->GetLastSubmitCommandLengthForTesting() < 65536);
         W->StopDataTableStreaming(); W->ReleaseSlateResources(false); return true;
     }
 };
@@ -291,6 +331,39 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsStreamingMemoryTest, "EChartsWidget.Str
 bool FEChartsStreamingMemoryTest::RunTest(const FString& Parameters)
 {
     ADD_LATENT_AUTOMATION_COMMAND(FEChartsStreamMemoryCommand(this));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsStreamingRingBufferTest, "EChartsWidget.Streaming.RingBuffer100K",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsStreamingRingBufferTest::RunTest(const FString& Parameters)
+{
+    FEChartsSeriesData Series;
+    Series.Type = EEChartsSeriesDataType::Numeric2D;
+    Series.Numeric2D.Reserve(FEChartsPayloadBuilder::MaxPointCount * 2 + 1);
+    for (int32 I = 0; I < FEChartsPayloadBuilder::MaxPointCount; ++I) Series.Numeric2D.Add({double(I), double(I)});
+    for (int32 I = 0; I < FEChartsPayloadBuilder::MaxPointCount; ++I)
+    {
+        Series.Numeric2D.Add({double(I + FEChartsPayloadBuilder::MaxPointCount), double(I)});
+        Series.TrimFront(1);
+    }
+    TestEqual(TEXT("Logical 100k window stays exact"), Series.Num(), FEChartsPayloadBuilder::MaxPointCount);
+    TestTrue(TEXT("Physical cache is bounded by two logical windows"), Series.PhysicalNum() <= FEChartsPayloadBuilder::MaxPointCount * 2);
+    TestEqual(TEXT("Logical head hides the stale prefix"), Series.Numeric2D[Series.LogicalStart].X,
+        double(FEChartsPayloadBuilder::MaxPointCount));
+    FEChartsSeriesData Delta; Delta.Type = EEChartsSeriesDataType::Numeric2D; Delta.Numeric2D.Add({200000.0, 1.0});
+    FString Base64, Error;
+    TestTrue(TEXT("Single-point delta serializes"), FEChartsPayloadBuilder::BuildStreamDeltaBase64(
+        Delta, 1, 1, 2, Base64, Error));
+    TestTrue(TEXT("Single-point delta encoding is batch-sized"), Base64.Len() < 2048);
+    TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> FullSeries;
+    FullSeries[0] = Series;
+    FString FullBase64; int32 FullCount = 0;
+    TestTrue(TEXT("Logical 100k window full payload serializes"), FEChartsPayloadBuilder::BuildBase64Payload(
+        EEChartsTemplate::SegmentedAreaLine, EEChartsXAxisMode::ShowAll, FullSeries, 3,
+        FullBase64, FullCount, Error));
+    TestEqual(TEXT("Full payload sees only the logical 100k window"), FullCount, FEChartsPayloadBuilder::MaxPointCount);
+    TestTrue(TEXT("Single-step delta is independent of the 100k full payload size"), Base64.Len() * 100 < FullBase64.Len());
     return true;
 }
 
@@ -314,6 +387,30 @@ class FEChartsStreamCEFCommand : public IAutomationLatentCommand
         {
             const auto Points = W->GetCategorySeriesData(0); Count = Points.Num();
             for (int32 I = 0; I < Count; ++I) { if (I) { Expected += TEXT(","); Categories += TEXT(","); } Expected += FString::Printf(TEXT("%.0f"), Points[I].Y); Categories += TEXT("\"") + Points[I].X + TEXT("\""); }
+            FString Reference = TEXT("[");
+            const TArray<FEChartsCategoryDataPoint> Other = {{TEXT("0"), 900.0}, {TEXT("C"), 4.0}};
+            TSet<FString> StreamLabels;
+            for (const auto& Point : Points) StreamLabels.Add(Point.X);
+            for (const auto& Point : Other)
+            {
+                if (!StreamLabels.Contains(Point.X))
+                {
+                    if (Count++) { Expected += TEXT(","); Categories += TEXT(","); }
+                    Expected += TEXT("null"); Categories += TEXT("\"") + Point.X + TEXT("\"");
+                }
+            }
+            for (int32 I = 0; I < Count; ++I)
+            {
+                if (I) Reference += TEXT(",");
+                const FString Label = I < Points.Num() ? Points[I].X : (I - Points.Num() == 0 && !StreamLabels.Contains(TEXT("0")) ? TEXT("0") : TEXT("C"));
+                Reference += Label == TEXT("0") ? TEXT("900") : Label == TEXT("C") ? TEXT("4") : TEXT("null");
+            }
+            Reference += TEXT("]");
+            Expected += TEXT("]"); Categories += TEXT("]");
+            Test->TestEqual(bFinal ? TEXT("Final window length") : TEXT("First visible row length"), Points.Num(), bFinal ? 3 : 1);
+            FString Condition = FString::Printf(TEXT("o.series[0].data.length===o.xAxis[0].data.length&&JSON.stringify(o.series[0].data)==='%s'&&JSON.stringify(o.xAxis[0].data)==='%s'&&JSON.stringify(o.series[1].data)==='%s'"), *Expected, *Categories, *Reference);
+            W->ExecuteJavascript(FString::Printf(TEXT("(function(){var o=window.UEEChartsHost.getOptionForTesting();console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+((%s)?'OK':'BAD'));}());"), *Condition));
+            return;
         }
         else if (Mode == 2)
         {
@@ -344,13 +441,14 @@ public:
             UDataTable* Table = NewObject<UDataTable>(); Table->RowStruct = FEChartsDataTableTestRow::StaticStruct();
             for (int32 I = 5; I > 0; --I) { FEChartsDataTableTestRow R; R.X = I; R.Y = I * 10; R.Category = FString::FromInt(I % 2); Table->AddRow(FName(*FString::FromInt(I)), R); }
             FEChartsDataTableMapping M; M.X = Mode == 1 ? TEXT("Category") : TEXT("X"); M.Y = TEXT("Y"); M.Z = TEXT("Z"); W->SetDataTableMapping(Table, M);
+            if (Mode == 1) W->SetCategorySeriesData(1, {{TEXT("0"), 900.0}, {TEXT("C"), 4.0}});
             W->SetTimeSeriesEnabled(true); W->SetTimeSeriesWindow(3); return false;
         }
         if (FPlatformTime::Seconds() - Start > 40 || W->StreamState == EEChartsDataTableStreamState::Error)
         { Test->AddError(FString::Printf(TEXT("CEF stream failed/timeout at stage %d: %s"), Stage, *W->LastError)); Cleanup(); return true; }
         if (Stage == 0 && W->RuntimeState == EEChartsRuntimeState::Ready)
         { W->StartDataTableStreaming(0.3f, 1, bLoop, 1); Stage = 1; }
-        if (Stage == 1 && W->LastAppliedPointCount == 1)
+        if (Stage == 1 && W->LastAppliedPointCount == (Mode == 1 ? 3 : 1))
         {
             Test->TestTrue(TEXT("Real CEF applies the first row before full row preparation"), W->RowsProcessed < W->TotalRows);
             W->PauseDataTableStreaming(); Probe(false); Stage = 2;
@@ -373,6 +471,7 @@ public:
         {
             Test->TestEqual(TEXT("Only nonloop receives final-ACK Completed"), S->StreamCompletedCount, bLoop ? 0 : 1);
             Test->TestFalse(TEXT("Streaming applies without AutoApply"), W->bAutoApplyEnabled);
+            Test->TestTrue(TEXT("Real CEF uses bounded stream-delta submissions after the first full payload"), W->WasLastSubmitDeltaForTesting());
             if (bLoop) Test->TestTrue(TEXT("Real loop counter"), W->LoopCount >= 1);
             Probe(true); Stage = 6;
         }

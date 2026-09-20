@@ -80,8 +80,9 @@ struct ECHARTSWIDGET_API FEChartsSeriesData
 	TArray<FEChartsDataPoint2D> Numeric2D;
 	TArray<FEChartsCategoryDataPoint> Category;
 	TArray<FEChartsDataPoint3D> Data3D;
+	int32 LogicalStart = 0;
 
-	int32 Num() const
+	int32 PhysicalNum() const
 	{
 		switch (Type)
 		{
@@ -93,10 +94,36 @@ struct ECHARTSWIDGET_API FEChartsSeriesData
 		}
 	}
 
+	int32 Num() const
+	{
+		return FMath::Max(0, PhysicalNum() - LogicalStart);
+	}
+
+	void Compact()
+	{
+		if (LogicalStart <= 0) return;
+		switch (Type)
+		{
+		case EEChartsSeriesDataType::Numeric2D: Numeric2D.RemoveAt(0, LogicalStart, EAllowShrinking::No); break;
+		case EEChartsSeriesDataType::Category: Category.RemoveAt(0, LogicalStart, EAllowShrinking::No); break;
+		case EEChartsSeriesDataType::Data3D: Data3D.RemoveAt(0, LogicalStart, EAllowShrinking::No); break;
+		default: break;
+		}
+		LogicalStart = 0;
+	}
+
+	void TrimFront(const int32 Count)
+	{
+		LogicalStart += FMath::Clamp(Count, 0, Num());
+		const int32 Physical = PhysicalNum();
+		if (LogicalStart > 0 && LogicalStart * 2 >= Physical) Compact();
+	}
+
 	void ResetData()
 	{
 		Numeric2D.Reset();
 		Category.Reset();
 		Data3D.Reset();
+		LogicalStart = 0;
 	}
 };

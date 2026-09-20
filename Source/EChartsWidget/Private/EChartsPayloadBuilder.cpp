@@ -62,6 +62,7 @@ namespace
 
 	bool TryAccumulateJsonStringBytes(const FStringView Value, const int64 Limit, int64& InOutBytes)
 	{
+		if (InOutBytes < 0 || InOutBytes > Limit || Value.Len() > Limit - InOutBytes) return false;
 		for (int32 Index = 0; Index < Value.Len(); ++Index)
 		{
 			uint32 Codepoint = static_cast<uint32>(Value[Index]);
@@ -158,8 +159,9 @@ namespace
 			case EEChartsSeriesDataType::Unset:
 				break;
 			case EEChartsSeriesDataType::Numeric2D:
-				for (const FEChartsDataPoint2D& Point : Item.Numeric2D)
+				for (int32 Index = Item.LogicalStart; Index < Item.Numeric2D.Num(); ++Index)
 				{
+					const FEChartsDataPoint2D& Point = Item.Numeric2D[Index];
 					if (!TryAddBytes(4, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
@@ -170,8 +172,9 @@ namespace
 				}
 				break;
 			case EEChartsSeriesDataType::Category:
-				for (const FEChartsCategoryDataPoint& Point : Item.Category)
+				for (int32 Index = Item.LogicalStart; Index < Item.Category.Num(); ++Index)
 				{
+					const FEChartsCategoryDataPoint& Point = Item.Category[Index];
 					if (!TryAccumulateJsonStringBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAddBytes(6, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
@@ -182,8 +185,9 @@ namespace
 				}
 				break;
 			case EEChartsSeriesDataType::Data3D:
-				for (const FEChartsDataPoint3D& Point : Item.Data3D)
+				for (int32 Index = Item.LogicalStart; Index < Item.Data3D.Num(); ++Index)
 				{
+					const FEChartsDataPoint3D& Point = Item.Data3D[Index];
 					if (!TryAddBytes(7, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
@@ -260,14 +264,16 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 		case EEChartsSeriesDataType::Unset:
 			break;
 		case EEChartsSeriesDataType::Numeric2D:
-			for (const FEChartsDataPoint2D& Point : Item.Numeric2D)
+			for (int32 Index = Item.LogicalStart; Index < Item.Numeric2D.Num(); ++Index)
 			{
+				const FEChartsDataPoint2D& Point = Item.Numeric2D[Index];
 				Data.Add(NumberArray({Point.X, Point.Y}));
 			}
 			break;
 		case EEChartsSeriesDataType::Category:
-			for (const FEChartsCategoryDataPoint& Point : Item.Category)
+			for (int32 Index = Item.LogicalStart; Index < Item.Category.Num(); ++Index)
 			{
+				const FEChartsCategoryDataPoint& Point = Item.Category[Index];
 				TArray<TSharedPtr<FJsonValue>> Pair;
 				Pair.Reserve(2);
 				Pair.Add(MakeShared<FJsonValueString>(Point.X));
@@ -276,8 +282,9 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 			}
 			break;
 		case EEChartsSeriesDataType::Data3D:
-			for (const FEChartsDataPoint3D& Point : Item.Data3D)
+			for (int32 Index = Item.LogicalStart; Index < Item.Data3D.Num(); ++Index)
 			{
+				const FEChartsDataPoint3D& Point = Item.Data3D[Index];
 				Data.Add(NumberArray({Point.X, Point.Y, Point.Z, Point.ColorValue, Point.SymbolSizeValue}));
 			}
 			break;
@@ -342,6 +349,92 @@ bool FEChartsPayloadBuilder::DecodeBase64Payload(const FString& Base64, FString&
 	const FUTF8ToTCHAR Converted(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()), Bytes.Num());
 	OutJson = FString(Converted.Length(), Converted.Get());
 	return true;
+}
+
+bool FEChartsPayloadBuilder::BuildStreamDeltaBase64(
+	const FEChartsSeriesData& Delta,
+	const int32 DropCount,
+	const int64 BaseRevision,
+	const int64 Revision,
+	FString& OutBase64,
+	FString& OutError)
+{
+	OutBase64.Reset();
+	OutError.Reset();
+	if (DropCount < 0 || BaseRevision <= 0 || Revision <= 0 || Delta.Num() > 256)
+	{
+		OutError = TEXT("Invalid ECharts stream delta metadata.");
+		return false;
+	}
+	TStaticArray<FEChartsSeriesData, MaxSeriesCount> PreflightSeries;
+	PreflightSeries[0] = Delta;
+	int32 PointCount = 0;
+	if (!PreflightPayload(PreflightSeries, PointCount, OutError)) return false;
+
+	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetNumberField(TEXT("revision"), static_cast<double>(Revision));
+	Root->SetNumberField(TEXT("baseRevision"), static_cast<double>(BaseRevision));
+	Root->SetNumberField(TEXT("drop"), DropCount);
+	TSharedRef<FJsonObject> JsonSeries = MakeShared<FJsonObject>();
+	JsonSeries->SetNumberField(TEXT("index"), 0);
+	JsonSeries->SetStringField(TEXT("type"), SeriesTypeName(Delta.Type));
+	TArray<TSharedPtr<FJsonValue>> Data;
+	Data.Reserve(Delta.Num());
+	switch (Delta.Type)
+	{
+	case EEChartsSeriesDataType::Numeric2D:
+		for (int32 Index = Delta.LogicalStart; Index < Delta.Numeric2D.Num(); ++Index)
+		{
+			const auto& Point = Delta.Numeric2D[Index];
+			Data.Add(NumberArray({Point.X, Point.Y}));
+		}
+		break;
+	case EEChartsSeriesDataType::Category:
+		for (int32 Index = Delta.LogicalStart; Index < Delta.Category.Num(); ++Index)
+		{
+			const auto& Point = Delta.Category[Index];
+			TArray<TSharedPtr<FJsonValue>> Pair;
+			Pair.Add(MakeShared<FJsonValueString>(Point.X));
+			Pair.Add(MakeShared<FJsonValueNumber>(Point.Y));
+			Data.Add(MakeShared<FJsonValueArray>(MoveTemp(Pair)));
+		}
+		break;
+	case EEChartsSeriesDataType::Data3D:
+		for (int32 Index = Delta.LogicalStart; Index < Delta.Data3D.Num(); ++Index)
+		{
+			const auto& Point = Delta.Data3D[Index];
+			Data.Add(NumberArray({Point.X, Point.Y, Point.Z, Point.ColorValue, Point.SymbolSizeValue}));
+		}
+		break;
+	default: break;
+	}
+	JsonSeries->SetArrayField(TEXT("data"), MoveTemp(Data));
+	Root->SetObjectField(TEXT("series"), JsonSeries);
+	FString Json;
+	const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Json);
+	if (!FJsonSerializer::Serialize(Root, Writer))
+	{
+		OutError = TEXT("Failed to serialize ECharts stream delta.");
+		return false;
+	}
+	const FTCHARToUTF8 Utf8(*Json);
+	if (Utf8.Length() > MaxJsonBytes)
+	{
+		OutError = FString::Printf(TEXT("ECharts stream delta exceeds the %d byte JSON safety limit."), MaxJsonBytes);
+		return false;
+	}
+	OutBase64 = FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+	return true;
+}
+
+bool FEChartsPayloadBuilder::AccumulateJsonStringBytes(const FString& Value, const int64 Limit, int64& InOutBytes)
+{
+	return TryAccumulateJsonStringBytes(Value, Limit, InOutBytes);
+}
+
+bool FEChartsPayloadBuilder::AccumulateFiniteDoubleBytes(const double Value, const int64 Limit, int64& InOutBytes)
+{
+	return TryAccumulateFiniteDoubleBytes(Value, Limit, InOutBytes);
 }
 
 #if WITH_DEV_AUTOMATION_TESTS

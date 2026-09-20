@@ -157,10 +157,10 @@ void EChartsDataTableLoader::ReadSortKey(
 {
 	check(IsInGameThread());
 	Out.RowKey = RowName;
-	Out.RowName = RowName.GetPlainNameString();
-	Out.RowNameNumber = RowName.GetNumber();
 	if (S.Mapping.Order == EEChartsDataTableOrder::RowName)
 	{
+		Out.RowName = RowName.GetPlainNameString();
+		Out.RowNameNumber = RowName.GetNumber();
 		Out.bValidSortKey = true;
 		return;
 	}

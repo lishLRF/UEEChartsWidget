@@ -100,6 +100,14 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 		{
 			FEChartsDataTableRow SortKey;
 			EChartsDataTableLoader::ReadSortKey(MappedDataTable, S->RowNames[S->SortKeysProcessed], *S, SortKey);
+			if (S->bCategory && SortKey.bValidSortKey &&
+				!FEChartsPayloadBuilder::AccumulateJsonStringBytes(SortKey.Category, FEChartsPayloadBuilder::MaxJsonBytes,
+					S->EstimatedSortKeyJsonBytes))
+			{
+				FailDataTableLoad(FString::Printf(TEXT("DataTable stream sort keys exceed the %d byte JSON safety limit."),
+					FEChartsPayloadBuilder::MaxJsonBytes));
+				return false;
+			}
 			S->Rows.Add(MoveTemp(SortKey));
 		}
 		if (S->SortKeysProcessed < TotalRows) return true;
@@ -113,7 +121,10 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 		FEChartsDataTableRow Row;
 		if (EChartsDataTableLoader::ReadRow(MappedDataTable, S->RowNames[RowsProcessed], *S, Row))
 		{
-			if (S->bStreaming) AppendPreparedStreamRow(MoveTemp(Row));
+			if (S->bStreaming)
+			{
+				if (!AppendPreparedStreamRow(MoveTemp(Row))) return false;
+			}
 			else S->Rows.Add(MoveTemp(Row));
 			++RowsSucceeded;
 		}

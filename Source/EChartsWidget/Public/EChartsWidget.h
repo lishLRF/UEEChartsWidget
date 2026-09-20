@@ -27,6 +27,13 @@ enum class EEChartsRuntimeState : uint8
 	Error
 };
 
+struct FEChartsPendingStreamDelta
+{
+	FEChartsSeriesData Added;
+	int32 DropCount = 0;
+	int64 Revision = 0;
+};
+
 UCLASS(meta = (DisplayName = "ECharts Widget"))
 class ECHARTSWIDGET_API UEChartsWidget : public UWebBrowser
 {
@@ -237,6 +244,12 @@ public:
 	int32 GetStreamSortKeysProcessedForTesting() const;
 	int32 GetStreamTickCallsForTesting() const { return StreamTickCallsForTesting; }
 	int32 GetSameFrameStreamTickCallsForTesting() const { return SameFrameStreamTickCallsForTesting; }
+	int32 GetStreamPhysicalPointCountForTesting() const { return SeriesData[0].PhysicalNum(); }
+	int32 GetLastSubmitCommandLengthForTesting() const { return LastSubmitCommandLengthForTesting; }
+	bool WasLastSubmitDeltaForTesting() const { return bLastSubmitWasDeltaForTesting; }
+	int64 GetInFlightRevisionForTesting() const { return InFlightRevision; }
+	void AcknowledgeCurrentApplyForTesting();
+	void AcknowledgeRevisionForTesting(int64 Revision);
 	uint32 GetNumericStreamAllocatedBytesForTesting() const { return SeriesData[0].Numeric2D.GetAllocatedSize(); }
 #endif
 
@@ -269,8 +282,10 @@ private:
 	void ScheduleStreamTicker();
 	bool StreamStep(uint64 Request);
 	void SortStreamRowNames(uint64 Request);
-	void AppendPreparedStreamRow(struct FEChartsDataTableRow&& Row);
+	bool AppendPreparedStreamRow(struct FEChartsDataTableRow&& Row);
 	void StartPreparedStream(uint64 Request);
+	void QueueStreamDelta(FEChartsSeriesData&& Added, int32 DropCount);
+	void InvalidateStreamDelta();
 	void FailStreaming(const FString& Error);
 	void CompleteStreamIfAcknowledged(int64 Revision);
 	void TrimStreamWindow();
@@ -286,6 +301,11 @@ private:
 	bool bStreamProductionComplete = false;
 	bool bPreserveStreamCategoryOrder = false;
 	int64 StreamFinalRevision = 0;
+	int64 StreamSourceJsonBytes = 1024;
+	TArray<FEChartsPendingStreamDelta> PendingStreamDeltas;
+	bool bRecordingStreamStep = false;
+	bool bStreamDeltaReady = false;
+	int64 StreamFullPayloadRevision = 0;
 	UPROPERTY(Transient) TObjectPtr<UDataTable> MappedDataTable;
 	FEChartsDataTableMapping DataTableMapping;
 	TSharedPtr<struct FEChartsDataTableSnapshot> DataTableSnapshot;
@@ -318,6 +338,8 @@ private:
 	int32 StreamTickCallsForTesting = 0;
 	int32 SameFrameStreamTickCallsForTesting = 0;
 	uint64 LastStreamTickFrameForTesting = MAX_uint64;
+	int32 LastSubmitCommandLengthForTesting = 0;
+	bool bLastSubmitWasDeltaForTesting = false;
 	bool bReportSeriesCountForTesting = false;
 	FString InitializationPayloadForTesting = TEXT("{}");
 #endif
@@ -333,6 +355,7 @@ public:
 		EEChartsInteractionMode InteractionMode,
 		const FString& PayloadJson);
 	static FString BuildApplyDataCommand(const FString& PayloadBase64);
+	static FString BuildApplyStreamDeltaCommand(const FString& PayloadBase64);
 };
 
 class ECHARTSWIDGET_API FEChartsWidgetResourceLocator

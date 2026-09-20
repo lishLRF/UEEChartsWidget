@@ -235,6 +235,55 @@ test('stream category windows retain repeated X labels in append order across lo
   }
 });
 
+test('stream category order appends labels unique to other series without collapsing repeated slots', () => {
+  const state = createHostContext();
+  let option;
+  state.window.UEEChartsTemplates.createTemplate = (template) => ({
+    requestedTemplate: template, effectiveTemplate: template, option: { xAxis: {}, yAxis: {}, series: [] },
+  });
+  state.window.echarts.init = () => ({ clear() {}, resize() {}, dispose() {}, setOption(value) { option = value; } });
+  vm.runInContext(hostSource, state.context);
+  state.window.UEEChartsHost.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload({
+    revision: 1, template: 'SegmentedAreaLine', xAxisMode: 'Category', preserveCategoryOrder: true,
+    series: [
+      { index: 0, name: 'Stream', type: 'category', data: [['A', 1], ['B', 2], ['A', 3]] },
+      { index: 1, name: 'Reference', type: 'category', data: [['B', 9], ['C', 4]] },
+    ],
+  })), true);
+  assert.equal(JSON.stringify(option.xAxis.data), JSON.stringify(['A', 'B', 'A', 'C']));
+  assert.equal(JSON.stringify(option.series[0].data), JSON.stringify([1, 2, 3, null]));
+  assert.equal(JSON.stringify(option.series[1].data), JSON.stringify([null, 9, null, 4]));
+});
+
+test('stream deltas append and drop numeric category and 3D windows from the retained raw payload', () => {
+  const cases = [
+    { type: 'numeric2D', initial: [[1, 10], [2, 20]], append: [[3, 30]], expected: [[2, 20], [3, 30]] },
+    { type: 'category', initial: [['A', 1], ['B', 2]], append: [['A', 3]], expected: [2, 3], axis: ['B', 'A'] },
+    { type: 'data3D', initial: [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]], append: [[11, 12, 13, 14, 15]], expected: [[6, 7, 8, 9, 10], [11, 12, 13, 14, 15]] },
+  ];
+  cases.forEach(({ type, initial, append, expected, axis }) => {
+    const state = createHostContext();
+    let option;
+    state.window.UEEChartsTemplates.createTemplate = (template) => ({
+      requestedTemplate: template, effectiveTemplate: template, option: { xAxis: {}, yAxis: {}, series: [] },
+    });
+    state.window.echarts.init = () => ({ clear() {}, resize() {}, dispose() {}, setOption(value) { option = value; } });
+    vm.runInContext(hostSource, state.context);
+    state.window.UEEChartsHost.renderTemplate(type === 'data3D' ? 'DataTableScatter3D' : 'SegmentedAreaLine', {}, 'ClickOnly');
+    assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload({
+      revision: 1, template: type === 'data3D' ? 'DataTableScatter3D' : 'SegmentedAreaLine',
+      xAxisMode: type === 'category' ? 'Category' : 'ShowAll', preserveCategoryOrder: type === 'category',
+      series: [{ index: 0, name: 'Stream', type, data: initial }],
+    })), true);
+    assert.equal(state.window.UEEChartsHost.applyStreamDeltaBase64(encodePayload({
+      revision: 2, baseRevision: 1, drop: 1, series: { index: 0, type, data: append },
+    })), true);
+    assert.equal(JSON.stringify(option.series[0].data), JSON.stringify(expected));
+    if (axis) assert.equal(JSON.stringify(option.xAxis.data), JSON.stringify(axis));
+  });
+});
+
 test('3D data maps by the current effective template including WebGL fallbacks', () => {
   const cases = [
     { requested: 'Bar3DHeightMap', effective: 'Bar3DHeightMap', expectedType: 'bar3D', hasGrid3D: true },

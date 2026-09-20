@@ -29,6 +29,7 @@
     let currentEffectiveTemplate = null;
     let templateBaseOption = null;
     let currentOption = null;
+    let currentPayload = null;
     let currentInteractionMode = 'ClickOnly';
 
     function clone(value) {
@@ -100,7 +101,19 @@
       const orderedCategoryWindow = payload.preserveCategoryOrder === true &&
         payload.series.length > 0 && payload.series[0].type === 'category';
       if (orderedCategoryWindow) {
-        payload.series[0].data.forEach(function (point) { categoryLabels.push(point[0]); });
+        payload.series[0].data.forEach(function (point) {
+          categoryLabels.push(point[0]);
+          categoryLabelSet.add(point[0]);
+        });
+        payload.series.slice(1).forEach(function (series) {
+          if (series.type !== 'category') return;
+          series.data.forEach(function (point) {
+            if (!categoryLabelSet.has(point[0])) {
+              categoryLabelSet.add(point[0]);
+              categoryLabels.push(point[0]);
+            }
+          });
+        });
       } else {
         payload.series.forEach(function (series) {
           if (series.type !== 'category') return;
@@ -151,6 +164,7 @@
           output.type = 'line';
           output.data = orderedCategoryWindow && index === 0
             ? input.data.map(function (point) { return point[1]; })
+              .concat(new Array(categoryLabels.length - input.data.length).fill(null))
             : categoryLabels.map(function (label) {
             return valuesByLabel.has(label) ? valuesByLabel.get(label) : null;
           });
@@ -240,6 +254,7 @@
           currentEffectiveTemplate = result.effectiveTemplate;
           templateBaseOption = clone(option);
           currentOption = option;
+          currentPayload = null;
           currentInteractionMode = interactionMode || 'ClickOnly';
           if (parameters.get('testSeriesProbe') === '1') {
             const appliedOption = chart.getOption();
@@ -261,11 +276,40 @@
           const option = optionForPayload(payload);
           chart.setOption(option, { notMerge: true, lazyUpdate: false });
           currentOption = option;
+          currentPayload = clone(payload);
           emit('APPLIED', String(payload.revision) + ':' + String(pointCount));
           return true;
         } catch (error) {
           const detail = error && error.message ? error.message : String(error);
           emit('ERROR', 'data apply failed: ' + detail.replace(/[\r\n]+/g, ' | '));
+          return false;
+        }
+      },
+      applyStreamDeltaBase64: function (base64) {
+        try {
+          const delta = decodePayload(base64);
+          if (!currentPayload || !Number.isSafeInteger(delta.revision) || delta.revision <= 0 ||
+              !Number.isSafeInteger(delta.baseRevision) || delta.baseRevision !== currentPayload.revision ||
+              !Number.isSafeInteger(delta.drop) || delta.drop < 0 || !delta.series ||
+              delta.series.index !== 0 || delta.series.type !== currentPayload.series[0].type ||
+              !Array.isArray(delta.series.data) || delta.series.data.length > 256 ||
+              delta.drop > currentPayload.series[0].data.length) {
+            throw new Error('Invalid or stale stream delta');
+          }
+          const candidate = clone(currentPayload);
+          candidate.revision = delta.revision;
+          candidate.series[0].data.splice(0, delta.drop);
+          candidate.series[0].data.push.apply(candidate.series[0].data, clone(delta.series.data));
+          const pointCount = validatePayload(candidate);
+          const option = optionForPayload(candidate);
+          chart.setOption(option, { notMerge: true, lazyUpdate: false });
+          currentOption = option;
+          currentPayload = candidate;
+          emit('APPLIED', String(candidate.revision) + ':' + String(pointCount));
+          return true;
+        } catch (error) {
+          const detail = error && error.message ? error.message : String(error);
+          emit('ERROR', 'stream delta apply failed: ' + detail.replace(/[\r\n]+/g, ' | '));
           return false;
         }
       },

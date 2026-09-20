@@ -22,6 +22,15 @@ public:
 		bool bPreserveCategoryOrder = false);
 
 	static bool DecodeBase64Payload(const FString& Base64, FString& OutJson, FString& OutError);
+	static bool BuildStreamDeltaBase64(
+		const FEChartsSeriesData& Delta,
+		int32 DropCount,
+		int64 BaseRevision,
+		int64 Revision,
+		FString& OutBase64,
+		FString& OutError);
+	static bool AccumulateJsonStringBytes(const FString& Value, int64 Limit, int64& InOutBytes);
+	static bool AccumulateFiniteDoubleBytes(double Value, int64 Limit, int64& InOutBytes);
 
 #if WITH_DEV_AUTOMATION_TESTS
 	static void ResetSafetyInstrumentationForTesting();

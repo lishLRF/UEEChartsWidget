@@ -24,6 +24,7 @@ struct FEChartsDataTableSnapshot
 	bool bStreaming = false;
 	bool bSortKeysReady = false;
 	int32 SortKeysProcessed = 0;
+	int64 EstimatedSortKeyJsonBytes = 1024;
 	int32 Budget = 256;
 };
 namespace EChartsDataTableLoader

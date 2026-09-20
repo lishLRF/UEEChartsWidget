@@ -111,6 +111,7 @@ void UEChartsWidget::ReportDataError(const FString& Message)
 
 void UEChartsWidget::MarkDataChanged()
 {
+	if (IsStreamingActive() && !bRecordingStreamStep) InvalidateStreamDelta();
 	TrimStreamWindow();
 	if (!bInstallingDataTable && DataTableLoadState == EEChartsDataTableLoadState::Applying)
 	{
@@ -128,6 +129,7 @@ void UEChartsWidget::MarkDataChanged()
 	{
 		++DataRevision;
 	}
+	if (StreamFinalRevision != 0 && IsStreamingActive()) StreamFinalRevision = DataRevision;
 	bIsDirty = true;
 	bHasPresentationState = true;
 	ScheduleAutoApply();
@@ -225,8 +227,9 @@ bool UEChartsWidget::AppendSeriesData(const int32 SeriesIndex, const TArray<FECh
 
 TArray<FEChartsDataPoint2D> UEChartsWidget::GetSeriesData(const int32 SeriesIndex) const
 {
-	return IsValidSeriesIndex(SeriesIndex) && SeriesData[SeriesIndex].Type == EEChartsSeriesDataType::Numeric2D
-		? SeriesData[SeriesIndex].Numeric2D : TArray<FEChartsDataPoint2D>();
+	if (!IsValidSeriesIndex(SeriesIndex) || SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Numeric2D) return {};
+	const FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	return TArray<FEChartsDataPoint2D>(Series.Numeric2D.GetData() + Series.LogicalStart, Series.Num());
 }
 
 bool UEChartsWidget::SetCategorySeriesData(const int32 SeriesIndex, const TArray<FEChartsCategoryDataPoint>& Data)
@@ -277,8 +280,9 @@ bool UEChartsWidget::AppendCategorySeriesData(const int32 SeriesIndex, const TAr
 
 TArray<FEChartsCategoryDataPoint> UEChartsWidget::GetCategorySeriesData(const int32 SeriesIndex) const
 {
-	return IsValidSeriesIndex(SeriesIndex) && SeriesData[SeriesIndex].Type == EEChartsSeriesDataType::Category
-		? SeriesData[SeriesIndex].Category : TArray<FEChartsCategoryDataPoint>();
+	if (!IsValidSeriesIndex(SeriesIndex) || SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Category) return {};
+	const FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	return TArray<FEChartsCategoryDataPoint>(Series.Category.GetData() + Series.LogicalStart, Series.Num());
 }
 
 bool UEChartsWidget::Set3DData(const int32 SeriesIndex, const TArray<FEChartsDataPoint3D>& Data)
@@ -331,8 +335,9 @@ bool UEChartsWidget::Append3DData(const int32 SeriesIndex, const TArray<FECharts
 
 TArray<FEChartsDataPoint3D> UEChartsWidget::Get3DData(const int32 SeriesIndex) const
 {
-	return IsValidSeriesIndex(SeriesIndex) && SeriesData[SeriesIndex].Type == EEChartsSeriesDataType::Data3D
-		? SeriesData[SeriesIndex].Data3D : TArray<FEChartsDataPoint3D>();
+	if (!IsValidSeriesIndex(SeriesIndex) || SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Data3D) return {};
+	const FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	return TArray<FEChartsDataPoint3D>(Series.Data3D.GetData() + Series.LogicalStart, Series.Num());
 }
 
 bool UEChartsWidget::ClearSeries(const int32 SeriesIndex)
@@ -417,7 +422,24 @@ void UEChartsWidget::SubmitLatestData()
 	FString PayloadBase64;
 	FString Error;
 	int32 PointCount = 0;
-	if (DataTableApplyRevision == DataRevision && !DataTablePayloadBase64.IsEmpty())
+	bool bSubmitDelta = false;
+	int64 SubmissionRevision = DataRevision;
+	if (IsStreamingActive() && bStreamDeltaReady && !PendingStreamDeltas.IsEmpty())
+	{
+		const FEChartsPendingStreamDelta& Delta = PendingStreamDeltas[0];
+		SubmissionRevision = Delta.Revision;
+		if (!FEChartsPayloadBuilder::BuildStreamDeltaBase64(
+			Delta.Added, Delta.DropCount, LastAppliedRevision, SubmissionRevision, PayloadBase64, Error))
+		{
+			bApplyRequested = false;
+			FailStreaming(Error);
+			return;
+		}
+		PointCount = GetTotalPointCount();
+		PendingStreamDeltas.RemoveAt(0, 1, EAllowShrinking::No);
+		bSubmitDelta = true;
+	}
+	else if (DataTableApplyRevision == DataRevision && !DataTablePayloadBase64.IsEmpty())
 	{
 		PayloadBase64 = DataTablePayloadBase64;
 		PointCount = GetTotalPointCount();
@@ -431,10 +453,23 @@ void UEChartsWidget::SubmitLatestData()
 		return;
 	}
 
-	InFlightRevision = DataRevision;
-	bApplyRequested = false;
+	InFlightRevision = SubmissionRevision;
+	bApplyRequested = bSubmitDelta && !PendingStreamDeltas.IsEmpty();
 	LastSubmitSeconds = FPlatformTime::Seconds();
-	ExecuteJavascript(FEChartsWidgetJavascript::BuildApplyDataCommand(PayloadBase64));
+	if (!bSubmitDelta && IsStreamingActive())
+	{
+		bStreamDeltaReady = false;
+		StreamFullPayloadRevision = SubmissionRevision;
+		PendingStreamDeltas.Reset();
+	}
+	const FString Command = bSubmitDelta
+		? FEChartsWidgetJavascript::BuildApplyStreamDeltaCommand(PayloadBase64)
+		: FEChartsWidgetJavascript::BuildApplyDataCommand(PayloadBase64);
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+	LastSubmitCommandLengthForTesting = Command.Len();
+	bLastSubmitWasDeltaForTesting = bSubmitDelta;
+#endif
+	ExecuteJavascript(Command);
 }
 
 void UEChartsWidget::ScheduleAutoApply()
@@ -492,6 +527,7 @@ void UEChartsWidget::InitializeECharts(
 void UEChartsWidget::BeginLoadGeneration()
 {
 	CancelAutoApply();
+	if (IsStreamingActive()) InvalidateStreamDelta();
 	if (InFlightRevision != 0)
 	{
 		bApplyRequested = true;
@@ -631,6 +667,11 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		{
 			InFlightRevision = 0;
 			LastAppliedRevision = MessageRevision;
+			if (MessageRevision == StreamFullPayloadRevision)
+			{
+				StreamFullPayloadRevision = 0;
+				bStreamDeltaReady = IsStreamingActive();
+			}
 			LastAppliedPointCount = MessagePointCount;
 			if (MessageRevision == DataRevision)
 			{
@@ -651,6 +692,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			}
 			CompleteStreamIfAcknowledged(MessageRevision);
 			OnEChartsApplied.Broadcast(MessageRevision, MessagePointCount);
+			if (!PendingStreamDeltas.IsEmpty()) bApplyRequested = true;
 			if (bApplyRequested && bIsDirty)
 			{
 				SubmitLatestData();
@@ -659,6 +701,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			{
 				ScheduleAutoApply();
 			}
+			ScheduleStreamTicker();
 		}
 		return;
 	}
@@ -791,6 +834,14 @@ FString FEChartsWidgetJavascript::BuildApplyDataCommand(const FString& PayloadBa
 		*PayloadBase64);
 }
 
+FString FEChartsWidgetJavascript::BuildApplyStreamDeltaCommand(const FString& PayloadBase64)
+{
+	const FString FullCommand = BuildApplyDataCommand(PayloadBase64);
+	return FullCommand.IsEmpty()
+		? FString()
+		: FString::Printf(TEXT("window.UEEChartsHost.applyStreamDeltaBase64(\"%s\");"), *PayloadBase64);
+}
+
 void UEChartsWidget::BindConsoleMessage()
 {
 	OnConsoleMessage.AddUniqueDynamic(this, &UEChartsWidget::HandleEChartsConsoleMessage);
@@ -826,6 +877,18 @@ void UEChartsWidget::SetInitializationPayloadForTesting(
 {
 	InitializationPayloadForTesting = PayloadJson.IsEmpty() ? TEXT("{}") : PayloadJson;
 	bReportSeriesCountForTesting = bReportSeriesCount;
+}
+
+void UEChartsWidget::AcknowledgeCurrentApplyForTesting()
+{
+	if (InFlightRevision > 0) AcknowledgeRevisionForTesting(InFlightRevision);
+}
+
+void UEChartsWidget::AcknowledgeRevisionForTesting(const int64 Revision)
+{
+	OnConsoleMessage.Broadcast(
+		FString::Printf(TEXT("__UE_ECHARTS_APPLIED__:%llu:%lld:%d"), LoadGeneration, Revision, GetTotalPointCount()),
+		FString(), 0);
 }
 
 bool UEChartsWidget::IsAutoApplyScheduledForTesting() const
