@@ -16,7 +16,7 @@ ECharts Widget is an offline UMG chart plugin for **Unreal Engine 5.6 on Win64**
 
 For an upgrade, close the editor, back up the old `EChartsWidget`, and replace the whole folder. Do not overlay two versions. If binaries are stale, remove only this plugin's `Binaries` and `Intermediate` and rebuild; do not delete project content, saves, or user data.
 
-`Resources/Web/**`, `ThirdPartyLicenses/**`, and `THIRD_PARTY_NOTICES.md` are staged as NonUFS runtime dependencies. A Shipping package must retain them in the staged plugin tree.
+`Resources/Web/**`, `ThirdPartyLicenses/**`, the root `LICENSE`, and `THIRD_PARTY_NOTICES.md` are staged as NonUFS runtime dependencies. A Shipping package must retain them in the staged plugin tree.
 
 ## Five-minute quick start
 
@@ -55,14 +55,17 @@ Series indices are **0–3**. A series has one data type at a time. Numeric/cate
 Initialize ECharts(Template=SegmentedAreaLine, In Interaction Mode=ClickOnly) -> void
 
 Add Data Point(Series Index, X, Y) -> bool
-Set / Append Series Data(Series Index, FEChartsDataPoint2D[]) -> bool
+Set Series Data(Series Index, FEChartsDataPoint2D[]) -> bool
+Append Series Data(Series Index, FEChartsDataPoint2D[]) -> bool
 Get Series Data(Series Index) -> FEChartsDataPoint2D[]
 
 Add Category Data Point(Series Index, X:String, Y) -> bool
-Set / Append Category Series Data(Series Index, FEChartsCategoryDataPoint[]) -> bool
+Set Category Series Data(Series Index, FEChartsCategoryDataPoint[]) -> bool
+Append Category Series Data(Series Index, FEChartsCategoryDataPoint[]) -> bool
 Get Category Series Data(Series Index) -> FEChartsCategoryDataPoint[]
 
-Set / Append 3D Data(Series Index, FEChartsDataPoint3D[]) -> bool
+Set 3D Data(Series Index, FEChartsDataPoint3D[]) -> bool
+Append 3D Data(Series Index, FEChartsDataPoint3D[]) -> bool
 Get 3D Data(Series Index) -> FEChartsDataPoint3D[]
 
 Clear Series(Series Index) -> bool
@@ -109,7 +112,7 @@ Important events:
 
 Supported top-level scalar columns:
 
-- Numeric: integer and floating properties except enum-backed bytes; usable as numeric X/Y/Z/Color/SymbolSize.
+- Numeric: integer and floating properties except enum properties and enum-backed bytes; usable as numeric X/Y/Z/Color/SymbolSize.
 - Category: `FString`, `FName`, `FText`, enums; usable as 2D X.
 - Unsupported: bool, `FDateTime`, nested structs, objects, arrays/collections, non-scalar fixed arrays.
 
@@ -144,7 +147,9 @@ Limits/defaults:
 - Preparation Rows Per Frame: 1–4096, default 256.
 - Source: at most 100000 rows and an estimated 16 MiB JSON representation.
 
-States are `Stopped`, `Preparing`, `Playing`, `Paused`, `Completed`, `Error`. Sort keys and rows are read incrementally on the Game Thread; stable sorting/conversion use worker work. The first batch may display before all rows are prepared, without blocking the Game Thread.
+States are `Stopped`, `Preparing`, `Playing`, `Paused`, `Completed`, `Error`. Sort keys are read incrementally on the Game Thread and a worker only performs the stable row-name sort. The Game Thread then uses `Preparation Rows Per Frame` to reflect and convert rows and builds each small delta with no more than `Rows Per Step` points. The first batch may display before all rows are prepared, without blocking the Game Thread.
+
+If preparation finishes with zero valid rows, the stream enters `Error` with `DataTable contains no valid rows to stream.`
 
 Steady-state updates send small deltas and use a true ring. At most two unacknowledged deltas are queued; production pauses under browser backpressure. `Loop=true` does not clear the chart: the cursor returns to row zero, new rows append, and old rows fall out of the ring. Stop releases timers/prepared source but preserves the visible window. Release/Rebuild suspends and resumes preparation/playback and replays the presentation state.
 
@@ -182,7 +187,8 @@ host.resize();
 ## Performance and limits
 
 - No Sleep or synchronous CEF wait is used.
-- DataTable reflection reads are Game-Thread frame-budgeted; stable sorting/conversion/serialization use worker work.
+- Snapshot reflection reads are Game-Thread frame-budgeted; its worker performs stable sorting, conversion, and complete-payload construction.
+- A stream worker only performs the stable row-name sort. The Game Thread frame-budgets reflection/conversion and builds deltas of at most `Rows Per Step`; a true ring and at most two pending deltas bound steady-state work.
 - Auto Apply allows one in-flight revision and coalesces newer dirty state.
 - Stream uses deltas, at most two pending batches, and a true ring.
 - 4 series, 100000 total points, 16 MiB data/option JSON, 1 MiB Raw JS.
@@ -212,7 +218,17 @@ From the plugin root:
 node --test Tests/Web/assets.test.js Tests/Web/templates.test.js Tests/Web/chart-host.test.js
 ```
 
-UE logic tests may use NullRHI; real CEF integration tests require a rendered D3D12 Slate browser:
+UE logic tests can run with NullRHI:
+
+```powershell
+$Project = "D:\Work\YourProject\YourProject.uproject"
+& "$env:UE_ROOT\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
+  $Project -unattended -nop4 -NoSplash -NoSound -NullRHI `
+  '-ExecCmds=Automation RunTests EChartsWidget;Quit' `
+  '-TestExit=Automation Test Queue Empty'
+```
+
+Real CEF integration tests require a rendered D3D12 Slate browser and must not use NullRHI:
 
 ```powershell
 $Project = "D:\Work\YourProject\YourProject.uproject"
@@ -240,3 +256,5 @@ $Package = "D:\Build\EChartsWidget-1.0.0"
 - Pinned sources and SHA-256: [vendor manifest](Resources/Web/vendor/manifest.json)
 
 Keep `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `ThirdPartyLicenses` when redistributing the plugin.
+
+The root `LICENSE` is explicitly staged as a NonUFS runtime dependency alongside the notices and third-party license directory.

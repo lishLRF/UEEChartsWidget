@@ -59,6 +59,7 @@ ECharts Widget 是面向 **Unreal Engine 5.6 / Win64** 的离线 UMG 图表插�
 
 - `Resources/Web/**`
 - `ThirdPartyLicenses/**`
+- `LICENSE`
 - `THIRD_PARTY_NOTICES.md`
 
 正常使用 Package Project 或 `BuildCookRun` 即可；不要把资源手工塞入 `Content` 或改成 CDN。打包后应在 staged 插件目录中找到 `chart-host.html`、`chart-host.js`、`templates.js` 和两个 vendor bundle。若缺失，先检查 staging/插件过滤规则。
@@ -301,6 +302,8 @@ Initialize ECharts(2D 或 3D 模板)
 
 启动进入 `Preparing`。排序 key 在 Game Thread 分帧读取，稳定排序在 worker，完整行继续分帧读取。第一批有效行准备好即可 Playing，**可早于整表准备完成**，不会为整表阻塞 Game Thread。
 
+若源表处理完仍没有任何有效行，stream 最终进入 `Error`，错误信息为 `DataTable contains no valid rows to stream.`。
+
 稳态发送小 delta（新增行+淘汰数），不每步重发完整窗口。未 ACK 时最多保留 **2 个 pending delta**，满后背压暂停，ACK 后恢复。Series 0 使用真环形缓存。Loop 到尾不清空，`Current Row` 回 0，首行继续追加；重复 Category 标签保留位置。
 
 Pause 保留光标/窗口；Resume 继续；Stop 清理 ticker/准备源但保留显示。Slate/CEF Release 时准备/播放挂起；Rebuild 新建世代、恢复准备/播放并重放显示，旧世代消息被忽略。
@@ -404,11 +407,11 @@ host.resize();
 
 ## 10. 性能、线程与限制
 
-实现没有 Sleep、同步 CEF 等待或等待 JS 的阻塞循环，使用 revision + console marker ACK：
+实现没有 Sleep、同步 CEF 等待或等待 JS 的阻塞循环，使用 revision + console marker ACK。Snapshot 与 Stream 的线程分工不同：
 
-- UObject/反射读取在 Game Thread，受每帧预算限制。
-- 稳定排序、转换、完整 payload 构建在 worker，结果回 Game Thread 安装。
-- Stream 首批早于完整准备，稳态用 delta + 有界 pending。
+- **Snapshot**：UObject/反射读取在 Game Thread，受 `RowsPerFrame` 预算限制；worker 负责稳定排序、转换和完整 payload 构建，结果回 Game Thread 安装。
+- **Stream**：worker **只**负责稳定排序行名；Game Thread 按 `PreparationRowsPerFrame` 分帧做反射读取和点转换，并为每步构建不超过 `RowsPerStep` 的小 delta。真环窗口和最多 2 个 pending delta 控制稳态成本。
+- Stream 首批可早于完整准备显示，稳态不反复发送完整源表。
 - Auto Apply 一次仅一笔在途，ACK 后提交最新 dirty 状态。
 - 无 UE 鼠标轮询；宿主页使用 `ResizeObserver`。
 

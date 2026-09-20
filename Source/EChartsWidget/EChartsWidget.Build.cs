@@ -28,6 +28,7 @@ public class EChartsWidget : ModuleRules
 
 		AddRuntimeDependenciesForDirectory("Resources/Web");
 		AddRuntimeDependenciesForDirectory("ThirdPartyLicenses");
+		RuntimeDependencies.Add("$(PluginDir)/LICENSE", StagedFileType.NonUFS);
 		RuntimeDependencies.Add("$(PluginDir)/THIRD_PARTY_NOTICES.md", StagedFileType.NonUFS);
 	}
 

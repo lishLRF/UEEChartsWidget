@@ -771,11 +771,14 @@ bool FEChartsStagingRulesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Runtime dependencies are registered"), BuildRules.Contains(TEXT("RuntimeDependencies.Add")));
 	TestTrue(TEXT("Runtime dependencies use NonUFS staging"), BuildRules.Contains(TEXT("StagedFileType.NonUFS")));
 	TestTrue(TEXT("Staging target remains plugin-relative"), BuildRules.Contains(TEXT("$(PluginDir)")));
+	TestTrue(TEXT("Root LICENSE is explicitly staged as NonUFS"), BuildRules.Contains(
+		TEXT("RuntimeDependencies.Add(\"$(PluginDir)/LICENSE\", StagedFileType.NonUFS);")));
 
 	FString FilterRules;
 	const FString FilterRulesPath = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Config/FilterPlugin.ini"));
 	TestTrue(TEXT("Plugin filter can be read"), FFileHelper::LoadFileToString(FilterRules, *FilterRulesPath));
 	TestTrue(TEXT("Plugin filter includes all third-party licenses"), FilterRules.Contains(TEXT("/ThirdPartyLicenses/...")));
+	TestTrue(TEXT("Plugin filter includes the root LICENSE"), FilterRules.Contains(TEXT("/LICENSE")));
 	TestTrue(TEXT("Apache ECharts NOTICE is present for staging"), IFileManager::Get().FileExists(
 		*FPaths::Combine(Plugin->GetBaseDir(), TEXT("ThirdPartyLicenses/ECharts-NOTICE.txt"))));
 	TestTrue(TEXT("D3 BSD license is present for staging"), IFileManager::Get().FileExists(
