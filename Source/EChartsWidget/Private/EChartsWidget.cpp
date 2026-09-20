@@ -97,7 +97,7 @@ int32 UEChartsWidget::GetTotalPointCount() const
 
 bool UEChartsWidget::CanReplacePointCount(const int32 SeriesIndex, const int32 NewSeriesPointCount) const
 {
-	const int32 BoundedCount = SeriesIndex == 0 && IsStreamingActive() && bTimeSeriesEnabled
+	const int32 BoundedCount = SeriesIndex == 0 && SeriesData[0].RingCapacity > 0 && bTimeSeriesEnabled
 		? FMath::Min(NewSeriesPointCount, TimeSeriesWindow) : NewSeriesPointCount;
 	return IsValidSeriesIndex(SeriesIndex) && NewSeriesPointCount >= 0 &&
 		GetTotalPointCount() - SeriesData[SeriesIndex].Num() + BoundedCount <= FEChartsPayloadBuilder::MaxPointCount;

@@ -354,6 +354,7 @@ void UEChartsWidget::CompleteStreamIfAcknowledged(int64 Revision)
 	CancelStreamTicker();
 	StreamFinalRevision = 0;
 	PreparedStreamRows = {};
+	SeriesData[0].Linearize();
 	StreamState = EEChartsDataTableStreamState::Completed;
 	OnDataTableStreamingCompleted.Broadcast();
 }

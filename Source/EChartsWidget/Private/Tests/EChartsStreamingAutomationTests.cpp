@@ -131,7 +131,17 @@ public:
             Ack(); Ack();
             Test->TestEqual(TEXT("Final ACK completes once"), S->StreamCompletedCount, 1);
             Test->TestEqual(TEXT("Completed state"), W->StreamState, EEChartsDataTableStreamState::Completed);
-            if (Mode == 0) Test->TestEqual(TEXT("Stable sorted suffix"), W->GetSeriesData(0)[0].X, 3.0);
+            if (Mode == 0)
+            {
+                Test->TestEqual(TEXT("Stable sorted suffix"), W->GetSeriesData(0)[0].X, 3.0);
+                W->SetTimeSeriesWindow(5);
+                Test->TestTrue(TEXT("Completed stream accepts ordinary Add"), W->AddDataPoint(0, 6.0, 60.0));
+                Test->TestTrue(TEXT("Completed stream accepts ordinary Append"), W->AppendSeriesData(0, {{7.0, 70.0}}));
+                const auto Grown = W->GetSeriesData(0);
+                Test->TestEqual(TEXT("Completed cache grows beyond the old ring capacity"), Grown.Num(), 5);
+                for (int32 I = 0; I < Grown.Num(); ++I)
+                    Test->TestEqual(TEXT("Completed cache preserves original suffix then new points"), Grown[I].X, double(I + 3));
+            }
             Cleanup(); return true;
         }
         return false;
@@ -219,6 +229,25 @@ bool FEChartsStreamingSourceLimitTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Long category is never retained in prepared source"), W->GetPreparedStreamCountForTesting(), 0);
     TestEqual(TEXT("Long FString is rejected before copying a category sort key"), W->GetStreamCategorySortKeyCopyCountForTesting(), 0);
     W->ReleaseSlateResources(false);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsStreamingPreparingMutationLimitTest, "EChartsWidget.Streaming.PreparingMutationLimit",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsStreamingPreparingMutationLimitTest::RunTest(const FString& Parameters)
+{
+    TStrongObjectPtr<UEChartsWidget> W(NewObject<UEChartsWidget>());
+    TStrongObjectPtr<UDataTable> T(NewObject<UDataTable>()); T->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+    FEChartsDataTableTestRow R; T->AddRow(TEXT("Only"), R);
+    FEChartsDataTableMapping M; M.X = TEXT("X"); M.Y = TEXT("Y"); W->SetDataTableMapping(T.Get(), M);
+    W->SetTimeSeriesEnabled(true); W->SetTimeSeriesWindow(3);
+    TestTrue(TEXT("Stream enters Preparing"), W->StartDataTableStreaming(1.0f, 1, false, 1));
+    TestEqual(TEXT("Mutation is tested before ring configuration"), W->StreamState, EEChartsDataTableStreamState::Preparing);
+    TArray<FEChartsDataPoint2D> Oversized; Oversized.SetNum(FEChartsPayloadBuilder::MaxPointCount + 1);
+    const int32 Before = W->GetSeriesData(0).Num();
+    TestFalse(TEXT("Preparing stream rejects an append beyond the global point limit"), W->AppendSeriesData(0, Oversized));
+    TestEqual(TEXT("Rejected Preparing append is atomic"), W->GetSeriesData(0).Num(), Before);
+    W->StopDataTableStreaming(); W->ReleaseSlateResources(false);
     return true;
 }
 
@@ -452,13 +481,16 @@ bool FEChartsStreamingRingBufferTest::RunTest(const FString& Parameters)
     Series.Numeric2D.Reserve(FEChartsPayloadBuilder::MaxPointCount * 2 + 1);
     for (int32 I = 0; I < FEChartsPayloadBuilder::MaxPointCount; ++I) Series.Numeric2D.Add({double(I), double(I)});
     Series.ConfigureRing(FEChartsPayloadBuilder::MaxPointCount);
+    const FEChartsDataPoint2D* StableData = Series.Numeric2D.GetData();
+    const SIZE_T StableAllocatedBytes = Series.Numeric2D.GetAllocatedSize();
     for (int32 I = 0; I < FEChartsPayloadBuilder::MaxPointCount; ++I)
     {
         Series.AddNumericRing({double(I + FEChartsPayloadBuilder::MaxPointCount), double(I)});
     }
     TestEqual(TEXT("Logical 100k window stays exact"), Series.Num(), FEChartsPayloadBuilder::MaxPointCount);
-    TestTrue(TEXT("Physical cache is bounded by two logical windows"), Series.PhysicalNum() <= FEChartsPayloadBuilder::MaxPointCount * 2);
-    TestEqual(TEXT("Steady-state ring never moves a large stale prefix"), Series.FrontMoveCountForTesting, int64(0));
+    TestEqual(TEXT("True ring physical count equals capacity"), Series.PhysicalNum(), FEChartsPayloadBuilder::MaxPointCount);
+    TestTrue(TEXT("True ring keeps the underlying allocation pointer stable"), Series.Numeric2D.GetData() == StableData);
+    TestEqual(TEXT("True ring keeps allocated bytes stable"), Series.Numeric2D.GetAllocatedSize(), StableAllocatedBytes);
     TestEqual(TEXT("Logical head hides the stale prefix"), Series.NumericAt(0).X,
         double(FEChartsPayloadBuilder::MaxPointCount));
     FEChartsSeriesData Delta; Delta.Type = EEChartsSeriesDataType::Numeric2D; Delta.Numeric2D.Add({200000.0, 1.0});
