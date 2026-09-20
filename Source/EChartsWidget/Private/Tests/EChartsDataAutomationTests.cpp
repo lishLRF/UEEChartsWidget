@@ -779,6 +779,7 @@ bool FEChartsApplyRevisionStateTest::RunTest(const FString& Parameters)
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
 	TestTrue(TEXT("Submitted revision remains dirty until APPLIED"), Widget->bIsDirty);
 	TestEqual(TEXT("Nothing acknowledged yet"), Widget->LastAppliedRevision, int64(0));
+	Widget->CompletePayloadBuildForTesting();
 
 	TestTrue(TEXT("Second mutation succeeds while first is in flight"), Widget->AddDataPoint(0, 3.0, 4.0));
 	Widget->ApplyEChartsChanges();
@@ -787,6 +788,7 @@ bool FEChartsApplyRevisionStateTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Old revision acknowledgement is recorded"), Widget->LastAppliedRevision, int64(1));
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:0:2:2"), FString(), 0);
 	TestTrue(TEXT("Old generation cannot clear dirty state"), Widget->bIsDirty);
+	Widget->CompletePayloadBuildForTesting();
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:1:2:2"), FString(), 0);
 	TestFalse(TEXT("Latest revision clears dirty state"), Widget->bIsDirty);
 	TestEqual(TEXT("Latest applied revision stored"), Widget->LastAppliedRevision, int64(2));
@@ -795,18 +797,21 @@ bool FEChartsApplyRevisionStateTest::RunTest(const FString& Parameters)
 	Widget->InitializeECharts(EEChartsTemplate::DataTableScatter3D, EEChartsInteractionMode::ClickOnly);
 	TestTrue(TEXT("Explicit Initialize marks cached presentation for replay"), Widget->bIsDirty);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	Widget->CompletePayloadBuildForTesting();
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:2:2:2"), FString(), 0);
 	TestFalse(TEXT("Explicit Initialize replay acknowledges the unchanged revision"), Widget->bIsDirty);
 	TestEqual(TEXT("Replay does not increment data revision"), Widget->LastAppliedRevision, int64(2));
 
 	Widget->ClearAll();
 	Widget->ApplyEChartsChanges();
+	Widget->CompletePayloadBuildForTesting();
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:2:3:0"), FString(), 0);
 	TestFalse(TEXT("ClearAll empty presentation can be acknowledged"), Widget->bIsDirty);
 	Widget->ReleaseSlateResources(false);
 	Widget->PrepareRebuildForTesting();
 	TestTrue(TEXT("Automatic rebuild marks cleared presentation for replay"), Widget->bIsDirty);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
+	Widget->CompletePayloadBuildForTesting();
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_APPLIED__:3:3:0"), FString(), 0);
 	TestFalse(TEXT("Automatic rebuild replays and acknowledges empty state"), Widget->bIsDirty);
 	TestEqual(TEXT("Empty replay keeps ClearAll revision"), Widget->LastAppliedRevision, int64(3));

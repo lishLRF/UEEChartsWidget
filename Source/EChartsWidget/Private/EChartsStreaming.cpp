@@ -198,7 +198,7 @@ void UEChartsWidget::CancelStreamTicker()
 
 void UEChartsWidget::ScheduleStreamTicker()
 {
-	if (bStreamingSuspended || bOptionBarrierActive || StreamState != EEChartsDataTableStreamState::Playing || StreamFinalRevision ||
+	if (bStreamingSuspended || bOptionBarrierActive || bPayloadBuildInFlight || StreamState != EEChartsDataTableStreamState::Playing || StreamFinalRevision ||
 		StreamTickerHandle.IsValid() || (InFlightRevision != 0 && PendingStreamDeltas.Num() >= 2)) return;
 	const uint64 Request = StreamRequest;
 	StreamTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
@@ -295,7 +295,7 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 		++LoopCount;
 		OnDataTableStreamLooped.Broadcast(LoopCount);
 	}
-	const bool bBackpressuredByBrowser = InFlightRevision != 0 && PendingStreamDeltas.Num() >= 2;
+	const bool bBackpressuredByBrowser = bPayloadBuildInFlight || (InFlightRevision != 0 && PendingStreamDeltas.Num() >= 2);
 	if (bBackpressuredByBrowser) StreamTickerHandle.Reset();
 	return Finish(Request == StreamRequest && StreamState == EEChartsDataTableStreamState::Playing && !StreamFinalRevision &&
 		!bStreamingSuspended && !bBackpressuredByBrowser);

@@ -342,7 +342,7 @@ namespace EChartsAdvancedTests
 	class FOptionBarrierStreamCommand final : public IAutomationLatentCommand
 	{
 	public:
-		explicit FOptionBarrierStreamCommand(FAutomationTestBase* InTest) : Test(InTest) {}
+		FOptionBarrierStreamCommand(FAutomationTestBase* InTest, const bool bInChain = false) : Test(InTest), bChain(bInChain) {}
 		virtual bool Update() override
 		{
 			if (!Widget)
@@ -363,13 +363,24 @@ namespace EChartsAdvancedTests
 			{
 				if (Widget->IsApplyInFlightForTesting()) Widget->AcknowledgeCurrentApplyForTesting();
 				SavedRows = Widget->StreamedRows;
-				Test->TestTrue(TEXT("Playing stream candidate accepted"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"candidate\"}}")));
+				Test->TestTrue(TEXT("Playing stream candidate accepted"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"candidate-a\"}}")));
+				if (bChain) Test->TestTrue(TEXT("Playing stream queues candidate B"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"candidate-b\"}}")));
 				Test->TestEqual(TEXT("Candidate barrier preserves Playing state"), Widget->StreamState, EEChartsDataTableStreamState::Playing);
 				Test->TestEqual(TEXT("Candidate barrier emits no Stopped event"), Sink->StreamStoppedCount, 0);
 				Test->TestFalse(TEXT("Candidate barrier pauses stream ticker"), Widget->IsDataTableStreamScheduledForTesting());
 				if (Widget->IsApplyInFlightForTesting()) Widget->AcknowledgeCurrentApplyForTesting();
 				const int64 Request = Widget->GetPendingOptionRequestIdForTesting();
 				Test->TestTrue(TEXT("Candidate waits for and crosses the data ACK boundary"), Request > 0);
+				if (bChain)
+				{
+					Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:CustomOption applied"), Request), FString(), 0);
+					const int64 Second = Widget->GetPendingOptionRequestIdForTesting();
+					Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:0:failed; previous chart restored"), Second), FString(), 0);
+					Test->TestEqual(TEXT("A success plus B failure commits stream stop"), Widget->StreamState, EEChartsDataTableStreamState::Stopped);
+					Test->TestEqual(TEXT("Candidate chain emits one Stopped event"), Sink->StreamStoppedCount, 1);
+					Test->TestEqual(TEXT("Candidate chain remains Ready"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
+					Cleanup(); return true;
+				}
 				Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:0:failed; previous chart restored"), Request), FString(), 0);
 				Test->TestEqual(TEXT("Failed candidate restores Playing state"), Widget->StreamState, EEChartsDataTableStreamState::Playing);
 				Test->TestEqual(TEXT("Failed candidate emits no Stopped event"), Sink->StreamStoppedCount, 0);
@@ -394,13 +405,14 @@ namespace EChartsAdvancedTests
 		double Deadline = 0.0;
 		int32 Stage = 0;
 		int64 SavedRows = 0;
+		bool bChain = false;
 	};
 
 	class FOptionBarrierProcessingCommand final : public IAutomationLatentCommand
 	{
 	public:
-		FOptionBarrierProcessingCommand(FAutomationTestBase* InTest, const bool bInRebuild)
-			: Test(InTest), bRebuild(bInRebuild) {}
+		FOptionBarrierProcessingCommand(FAutomationTestBase* InTest, const bool bInRebuild, const bool bInChain = false)
+			: Test(InTest), bRebuild(bInRebuild), bChain(bInChain) {}
 		virtual bool Update() override
 		{
 			if (!Widget)
@@ -438,6 +450,17 @@ namespace EChartsAdvancedTests
 				}
 				Test->TestEqual(TEXT("Worker completes Processing into Reading"), Widget->DataTableLoadState, EEChartsDataTableLoadState::Reading);
 				Test->TestEqual(TEXT("Stream remains Preparing behind candidate"), Widget->StreamState, EEChartsDataTableStreamState::Preparing);
+				if (bChain)
+				{
+					Test->TestTrue(TEXT("Processing chain queues candidate B"), Widget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"processing-b\"}}")));
+					Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:%d:%lld:1:CustomOption applied"), Generation, Request), FString(), 0);
+					const int64 Second = Widget->GetPendingOptionRequestIdForTesting();
+					Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:%d:%lld:0:failed; previous chart restored"), Generation, Second), FString(), 0);
+					Test->TestEqual(TEXT("Processing chain commits stream stop"), Widget->StreamState, EEChartsDataTableStreamState::Stopped);
+					Test->TestEqual(TEXT("Processing chain emits one Stopped"), Sink->StreamStoppedCount, 1);
+					Test->TestEqual(TEXT("Processing chain remains Ready"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
+					Cleanup(); return true;
+				}
 				Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:%d:%lld:0:failed; previous chart restored"), Generation, Request), FString(), 0);
 				Test->TestEqual(TEXT("Processing candidate failure remains Ready"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
 				Test->TestEqual(TEXT("Processing candidate emits no Stopped"), Sink->StreamStoppedCount, 0);
@@ -471,6 +494,50 @@ namespace EChartsAdvancedTests
 		int32 Stage = 0;
 		bool bRebuild = false;
 		bool bReadyForRebuild = false;
+		bool bChain = false;
+	};
+
+	class FAsyncPayloadBuildCommand final : public IAutomationLatentCommand
+	{
+	public:
+		explicit FAsyncPayloadBuildCommand(FAutomationTestBase* InTest) : Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (!Widget)
+			{
+				Deadline = FPlatformTime::Seconds() + 20.0;
+				Widget = MakeWidget(); Widget->InitializeECharts();
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+				TArray<FEChartsDataPoint2D> Large; Large.SetNum(100000);
+				for (int32 I = 0; I < Large.Num(); ++I) { Large[I].X = I; Large[I].Y = I; }
+				Test->TestTrue(TEXT("100k async payload source accepted"), Widget->SetSeriesData(0, Large));
+				Widget->BlockNextPayloadBuildForTesting();
+				Widget->ApplyEChartsChanges();
+				Test->TestTrue(TEXT("Apply only schedules the payload worker"), Widget->IsPayloadBuildInFlightForTesting());
+				Test->TestFalse(TEXT("Browser revision stays clear while worker is gated"), Widget->IsApplyInFlightForTesting());
+				Test->TestFalse(TEXT("Payload builder never ran on the game thread"), Widget->DidPayloadBuilderRunOnGameThreadForTesting());
+				Test->TestTrue(TEXT("First mutation coalesces during build"), Widget->SetSeriesData(0, {{1, 1}}));
+				Test->TestTrue(TEXT("Second mutation supersedes first during build"), Widget->SetSeriesData(0, {{2, 2}, {3, 3}}));
+				Widget->ReleaseSlateResources(false); Widget->PrepareRebuildForTesting();
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+				Widget->ReleasePayloadBuildForTesting();
+				return false;
+			}
+			if (FPlatformTime::Seconds() >= Deadline) { Test->AddError(TEXT("Async payload build timeout")); Cleanup(); return true; }
+			if (Widget->GetInFlightRevisionForTesting() > 0)
+			{
+				Test->TestEqual(TEXT("Only the latest revision reaches the browser"), Widget->GetInFlightRevisionForTesting(), int64(3));
+				Test->TestTrue(TEXT("Stale build is discarded and latest rebuilt"), Widget->GetPayloadBuildCountForTesting() >= 2);
+				Test->TestFalse(TEXT("Worker serialization never ran on game thread"), Widget->DidPayloadBuilderRunOnGameThreadForTesting());
+				Cleanup(); return true;
+			}
+			return false;
+		}
+	private:
+		void Cleanup() { if (Widget) { Widget->ReleasePayloadBuildForTesting(); DestroyWidget(Widget); Widget = nullptr; } }
+		FAutomationTestBase* Test;
+		UEChartsWidget* Widget = nullptr;
+		double Deadline = 0.0;
 	};
 }
 
@@ -747,6 +814,24 @@ bool FEChartsOptionBarrierSimpleSourcesTest::RunTest(const FString& Parameters)
 	FTSTicker::GetCoreTicker().Tick(0.01f);
 	TestTrue(TEXT("Resumed DataTable continues reading"), TableWidget->RowsProcessed > 0);
 	EChartsAdvancedTests::DestroyWidget(TableWidget); Sink->RemoveFromRoot();
+
+	UEChartsWidget* ChainWidget = EChartsAdvancedTests::MakeWidget();
+	UEChartsWidgetTestSink* ChainSink = NewObject<UEChartsWidgetTestSink>(); ChainSink->AddToRoot();
+	ChainWidget->OnDataTableLoadCancelled.AddDynamic(ChainSink, &UEChartsWidgetTestSink::HandleTableCancelled);
+	ChainWidget->InitializeECharts(); ChainWidget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	TestTrue(TEXT("Chain table maps"), ChainWidget->SetDataTableMapping(Table, Mapping)); ChainWidget->LoadDataTable(1);
+	TestTrue(TEXT("Chain candidate A accepted"), ChainWidget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"A\"}}")));
+	TestTrue(TEXT("Chain candidate B queued"), ChainWidget->SetEChartsOptionJSON(TEXT("{\"title\":{\"text\":\"B\"}}")));
+	const int64 FirstChainRequest = ChainWidget->GetPendingOptionRequestIdForTesting();
+	ChainWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:CustomOption applied"), FirstChainRequest), FString(), 0);
+	const int64 SecondChainRequest = ChainWidget->GetPendingOptionRequestIdForTesting();
+	ChainWidget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:0:failed; previous chart restored"), SecondChainRequest), FString(), 0);
+	TestEqual(TEXT("A success plus B failure commits DataTable cancellation"), ChainWidget->DataTableLoadState, EEChartsDataTableLoadState::Cancelled);
+	TestEqual(TEXT("Candidate chain cancels DataTable exactly once"), ChainSink->TableCancelledCount, 1);
+	TestFalse(TEXT("Candidate chain never resumes DataTable ticker"), ChainWidget->IsDataTablePrepareScheduledForTesting());
+	TestEqual(TEXT("Candidate chain commits CustomOption"), ChainWidget->CurrentTemplate, EEChartsTemplate::CustomOption);
+	TestEqual(TEXT("Candidate chain remains Ready"), ChainWidget->RuntimeState, EEChartsRuntimeState::Ready);
+	EChartsAdvancedTests::DestroyWidget(ChainWidget); ChainSink->RemoveFromRoot();
 	return true;
 }
 
@@ -755,6 +840,14 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierPlayingStreamTest,
 bool FEChartsOptionBarrierPlayingStreamTest::RunTest(const FString& Parameters)
 {
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionBarrierStreamCommand(this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierPlayingStreamChainTest,
+	"EChartsWidget.Advanced.OptionBarrierPlayingStreamChain", EChartsAdvancedTests::Flags)
+bool FEChartsOptionBarrierPlayingStreamChainTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionBarrierStreamCommand(this, true));
 	return true;
 }
 
@@ -771,6 +864,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierProcessingRebuildTest,
 bool FEChartsOptionBarrierProcessingRebuildTest::RunTest(const FString& Parameters)
 {
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionBarrierProcessingCommand(this, true));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierProcessingChainTest,
+	"EChartsWidget.Advanced.OptionBarrierProcessingChain", EChartsAdvancedTests::Flags)
+bool FEChartsOptionBarrierProcessingChainTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionBarrierProcessingCommand(this, false, true));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAsyncPayloadBuildTest,
+	"EChartsWidget.Advanced.AsyncPayloadBuild", EChartsAdvancedTests::Flags)
+bool FEChartsAsyncPayloadBuildTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FAsyncPayloadBuildCommand(this));
 	return true;
 }
 
@@ -791,7 +900,8 @@ bool FEChartsCustomOptionDataContinuityTest::RunTest(const FString& Parameters)
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:CustomOption applied"), OptionRequest), FString(), 0);
 	TestTrue(TEXT("Add remains usable after CustomOption"), Widget->AddDataPoint(0, 5.0, 6.0));
 	Widget->ApplyEChartsChanges();
-	TestTrue(TEXT("Apply remains usable after CustomOption"), Widget->IsApplyInFlightForTesting());
+	TestTrue(TEXT("Apply remains usable after CustomOption"),
+		Widget->IsPayloadBuildInFlightForTesting() || Widget->IsApplyInFlightForTesting());
 	EChartsAdvancedTests::DestroyWidget(Widget);
 	return true;
 }

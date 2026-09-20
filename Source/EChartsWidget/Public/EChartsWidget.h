@@ -34,6 +34,8 @@ struct FEChartsPendingStreamDelta
 	int64 Revision = 0;
 };
 
+struct FEChartsPayloadBuildTestGate;
+
 UCLASS(meta = (DisplayName = "ECharts Widget"))
 class ECHARTSWIDGET_API UEChartsWidget : public UWebBrowser
 {
@@ -293,6 +295,12 @@ public:
 	}
 	int64 GetPendingOptionRequestIdForTesting() const { return static_cast<int64>(PendingOptionRequestId); }
 	int64 GetPendingInteractionRequestIdForTesting() const { return static_cast<int64>(PendingInteractionRequestId); }
+	bool IsPayloadBuildInFlightForTesting() const { return bPayloadBuildInFlight; }
+	int32 GetPayloadBuildCountForTesting() const { return PayloadBuildCountForTesting; }
+	bool DidPayloadBuilderRunOnGameThreadForTesting() const { return PayloadBuildThreadFlagForTesting.IsValid() && *PayloadBuildThreadFlagForTesting; }
+	void BlockNextPayloadBuildForTesting();
+	void ReleasePayloadBuildForTesting();
+	void CompletePayloadBuildForTesting();
 	void SetOptionAtStreamSortStartForTesting(const FString& OptionJson, bool bReleaseAndPrepareRebuild)
 	{
 		OptionAtStreamSortStartForTesting = OptionJson;
@@ -316,6 +324,7 @@ private:
 	void MarkDataChanged();
 	void ReportDataError(const FString& Message);
 	void SubmitLatestData();
+	void DispatchDataPayload(const FString& PayloadBase64, int32 PointCount, int64 SubmissionRevision, bool bSubmitDelta);
 	void ScheduleAutoApply();
 	void CancelAutoApply();
 	uint64 AllocateAdvancedRequestId();
@@ -385,6 +394,9 @@ private:
 	TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> SeriesData;
 	int64 DataRevision = 0;
 	int64 InFlightRevision = 0;
+	uint64 PayloadBuildRequest = 0;
+	int64 PayloadBuildRevision = 0;
+	bool bPayloadBuildInFlight = false;
 	bool bApplyRequested = false;
 	double LastSubmitSeconds = 0.0;
 	FTSTicker::FDelegateHandle AutoApplyTickerHandle;
@@ -404,6 +416,7 @@ private:
 	bool bOptionReplayPending = false;
 	bool bInteractionReplayPending = false;
 	bool bOptionBarrierActive = false;
+	bool bOptionBarrierChainCommitted = false;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
 	int32 DataTableWorkerSnapshotPointCountForTesting = 0;
@@ -418,6 +431,9 @@ private:
 	FString InitializationPayloadForTesting = TEXT("{}");
 	FString OptionAtStreamSortStartForTesting;
 	bool bReleaseAtStreamSortStartForTesting = false;
+	int32 PayloadBuildCountForTesting = 0;
+	TSharedPtr<FEChartsPayloadBuildTestGate, ESPMode::ThreadSafe> PayloadBuildGateForTesting;
+	TSharedPtr<FThreadSafeBool, ESPMode::ThreadSafe> PayloadBuildThreadFlagForTesting;
 #endif
 };
 

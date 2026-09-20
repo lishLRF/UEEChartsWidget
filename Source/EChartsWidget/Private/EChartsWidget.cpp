@@ -1,16 +1,25 @@
 #include "EChartsWidget.h"
 #include "EChartsDataTableLoader.h"
 
+#include "Async/Async.h"
 #include "Containers/Ticker.h"
 #include "Dom/JsonObject.h"
 #include "HAL/PlatformTime.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Base64.h"
 #include "Misc/Paths.h"
+#include "HAL/PlatformProcess.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
 #define LOCTEXT_NAMESPACE "EChartsWidget"
+
+struct FEChartsPayloadBuildTestGate
+{
+	FEChartsPayloadBuildTestGate() : Event(FPlatformProcess::GetSynchEventFromPool(true)) {}
+	~FEChartsPayloadBuildTestGate() { FPlatformProcess::ReturnSynchEventToPool(Event); }
+	FEvent* Event = nullptr;
+};
 
 namespace
 {
@@ -478,16 +487,14 @@ void UEChartsWidget::SubmitLatestData()
 		bApplyRequested = false;
 		return;
 	}
-	if (RuntimeState != EEChartsRuntimeState::Ready || InFlightRevision != 0) return;
+	if (RuntimeState != EEChartsRuntimeState::Ready || InFlightRevision != 0 || bPayloadBuildInFlight) return;
 	FString PayloadBase64;
 	FString Error;
 	int32 PointCount = 0;
-	bool bSubmitDelta = false;
-	int64 SubmissionRevision = DataRevision;
 	if (IsStreamingActive() && bStreamDeltaReady && !PendingStreamDeltas.IsEmpty())
 	{
 		const FEChartsPendingStreamDelta& Delta = PendingStreamDeltas[0];
-		SubmissionRevision = Delta.Revision;
+		const int64 SubmissionRevision = Delta.Revision;
 		if (!FEChartsPayloadBuilder::BuildStreamDeltaBase64(
 			Delta.Added, Delta.DropCount, LastAppliedRevision, SubmissionRevision, PayloadBase64, Error))
 		{
@@ -497,22 +504,89 @@ void UEChartsWidget::SubmitLatestData()
 		}
 		PointCount = GetTotalPointCount();
 		PendingStreamDeltas.RemoveAt(0, 1, EAllowShrinking::No);
-		bSubmitDelta = true;
+		DispatchDataPayload(PayloadBase64, PointCount, SubmissionRevision, true);
+		return;
 	}
-	else if (DataTableApplyRevision == DataRevision && !DataTablePayloadBase64.IsEmpty())
+	if (DataTableApplyRevision == DataRevision && !DataTablePayloadBase64.IsEmpty())
 	{
-		PayloadBase64 = DataTablePayloadBase64;
-		PointCount = GetTotalPointCount();
-	}
-	else if (!FEChartsPayloadBuilder::BuildBase64Payload(
-		CurrentTemplate, XAxisMode, SeriesData, DataRevision, PayloadBase64, PointCount, Error, bPreserveStreamCategoryOrder))
-	{
-		bApplyRequested = false;
-		if (IsStreamingActive()) { FailStreaming(Error); return; }
-		ReportDataError(Error);
+		DispatchDataPayload(DataTablePayloadBase64, GetTotalPointCount(), DataRevision, false);
 		return;
 	}
 
+	const uint64 BuildRequest = ++PayloadBuildRequest;
+	const uint64 Generation = LoadGeneration;
+	const int64 Revision = DataRevision;
+	const EEChartsTemplate Template = CurrentTemplate;
+	const EEChartsXAxisMode AxisMode = XAxisMode;
+	const bool bPreserveOrder = bPreserveStreamCategoryOrder;
+	auto Snapshot = SeriesData;
+	bPayloadBuildInFlight = true;
+	PayloadBuildRevision = Revision;
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+	++PayloadBuildCountForTesting;
+	const auto TestGate = PayloadBuildGateForTesting;
+	const auto ThreadFlag = PayloadBuildThreadFlagForTesting;
+#endif
+	const TWeakObjectPtr<UEChartsWidget> WeakThis(this);
+	Async(EAsyncExecution::ThreadPool, [WeakThis, BuildRequest, Generation, Revision, Template, AxisMode,
+		bPreserveOrder, Snapshot = MoveTemp(Snapshot)
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+		, TestGate, ThreadFlag
+#endif
+	]() mutable
+	{
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+		if (ThreadFlag.IsValid()) *ThreadFlag = IsInGameThread();
+		if (TestGate.IsValid() && TestGate->Event) TestGate->Event->Wait();
+#endif
+		FString BuiltPayload;
+		FString BuildError;
+		int32 BuiltPointCount = 0;
+		const bool bBuilt = FEChartsPayloadBuilder::BuildBase64Payload(
+			Template, AxisMode, Snapshot, Revision, BuiltPayload, BuiltPointCount, BuildError, bPreserveOrder);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, BuildRequest, Generation, Revision, Template, AxisMode,
+			bPreserveOrder, bBuilt, BuiltPayload = MoveTemp(BuiltPayload), BuildError = MoveTemp(BuildError), BuiltPointCount]() mutable
+		{
+			UEChartsWidget* Widget = WeakThis.Get();
+			if (!Widget || Widget->PayloadBuildRequest != BuildRequest) return;
+			Widget->bPayloadBuildInFlight = false;
+			if (Widget->RuntimeState != EEChartsRuntimeState::Ready)
+			{
+				return;
+			}
+			if (Generation != Widget->LoadGeneration || Revision != Widget->DataRevision ||
+				Template != Widget->CurrentTemplate || AxisMode != Widget->XAxisMode ||
+				bPreserveOrder != Widget->bPreserveStreamCategoryOrder)
+			{
+				Widget->bApplyRequested = true;
+				Widget->SubmitLatestData();
+				return;
+			}
+			if (Widget->bOptionBarrierActive)
+			{
+				Widget->bApplyRequested = true;
+				Widget->SendPendingOrCachedOption();
+				return;
+			}
+			if (!bBuilt)
+			{
+				Widget->bApplyRequested = false;
+				if (Widget->IsStreamingActive()) Widget->FailStreaming(BuildError);
+				else Widget->ReportDataError(BuildError);
+				return;
+			}
+			Widget->DispatchDataPayload(BuiltPayload, BuiltPointCount, Revision, false);
+			if (Widget->IsStreamingActive()) Widget->ScheduleStreamTicker();
+		});
+	});
+}
+
+void UEChartsWidget::DispatchDataPayload(
+	const FString& PayloadBase64,
+	const int32 PointCount,
+	const int64 SubmissionRevision,
+	const bool bSubmitDelta)
+{
 	InFlightRevision = SubmissionRevision;
 	bApplyRequested = bSubmitDelta && !PendingStreamDeltas.IsEmpty();
 	LastSubmitSeconds = FPlatformTime::Seconds();
@@ -534,7 +608,7 @@ void UEChartsWidget::SubmitLatestData()
 
 void UEChartsWidget::ScheduleAutoApply()
 {
-	if (bOptionBarrierActive || !bAutoApplyEnabled || !bIsDirty || RuntimeState != EEChartsRuntimeState::Ready ||
+	if (bOptionBarrierActive || bPayloadBuildInFlight || !bAutoApplyEnabled || !bIsDirty || RuntimeState != EEChartsRuntimeState::Ready ||
 		InFlightRevision != 0 || AutoApplyTickerHandle.IsValid())
 	{
 		return;
@@ -610,7 +684,7 @@ void UEChartsWidget::SendPendingOrCachedOption()
 	if (!PendingOptionBase64.IsEmpty())
 	{
 		if (bOptionBarrierActive &&
-			(InFlightRevision != 0 || DataTableLoadState == EEChartsDataTableLoadState::Processing)) return;
+			(InFlightRevision != 0 || bPayloadBuildInFlight || DataTableLoadState == EEChartsDataTableLoadState::Processing)) return;
 		const FString Candidate = MoveTemp(PendingOptionBase64);
 		PendingOptionBase64.Reset();
 		SendOptionBase64(Candidate, true);
@@ -626,6 +700,7 @@ void UEChartsWidget::BeginOptionBarrier()
 {
 	if (bOptionBarrierActive) return;
 	bOptionBarrierActive = true;
+	bOptionBarrierChainCommitted = false;
 	CancelStreamTicker();
 	if (DataTableTickerHandle.IsValid())
 	{
@@ -665,6 +740,7 @@ void UEChartsWidget::ResolveOptionBarrier(const bool bCommit)
 		if (bApplyRequested && RuntimeState == EEChartsRuntimeState::Ready && InFlightRevision == 0) SubmitLatestData();
 		else ScheduleAutoApply();
 	}
+	bOptionBarrierChainCommitted = false;
 }
 
 void UEChartsWidget::SendInteractionMode()
@@ -831,6 +907,9 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 
 void UEChartsWidget::BeginDestroy()
 {
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+	ReleasePayloadBuildForTesting();
+#endif
 	StopStreaming(false);
 	StopDataTableLoad(false);
 	CancelAutoApply();
@@ -993,6 +1072,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				{
 					CachedOptionBase64 = CompletedOptionBase64;
 					CurrentTemplate = EEChartsTemplate::CustomOption;
+					bOptionBarrierChainCommitted = true;
 				}
 				EffectiveTemplate = FEChartsWidgetJavascript::TemplateName(EEChartsTemplate::CustomOption);
 				CancelAutoApply();
@@ -1002,7 +1082,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			{
 				if (bOptionBarrierActive && bWasCandidate && PendingOptionBase64.IsEmpty() && PendingOptionRequestId == 0)
 				{
-					ResolveOptionBarrier(bSuccess);
+					ResolveOptionBarrier(bSuccess || bOptionBarrierChainCommitted);
 				}
 				else SendPendingOrCachedOption();
 			}
@@ -1083,6 +1163,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				LastDataTableError = Error;
 			}
 			bOptionBarrierActive = false;
+			bOptionBarrierChainCommitted = false;
 			OnEChartsError.Broadcast(LastError);
 		}
 	}
@@ -1190,6 +1271,30 @@ const FText UEChartsWidget::GetPaletteCategory()
 #endif
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+void UEChartsWidget::BlockNextPayloadBuildForTesting()
+{
+	PayloadBuildGateForTesting = MakeShared<FEChartsPayloadBuildTestGate, ESPMode::ThreadSafe>();
+	PayloadBuildThreadFlagForTesting = MakeShared<FThreadSafeBool, ESPMode::ThreadSafe>(false);
+}
+
+void UEChartsWidget::ReleasePayloadBuildForTesting()
+{
+	if (PayloadBuildGateForTesting.IsValid() && PayloadBuildGateForTesting->Event)
+	{
+		PayloadBuildGateForTesting->Event->Trigger();
+	}
+	PayloadBuildGateForTesting.Reset();
+}
+
+void UEChartsWidget::CompletePayloadBuildForTesting()
+{
+	if (!bPayloadBuildInFlight) return;
+	++PayloadBuildRequest;
+	bPayloadBuildInFlight = false;
+	InFlightRevision = PayloadBuildRevision;
+	bApplyRequested = false;
+}
+
 void UEChartsWidget::RebindConsoleMessageForTesting()
 {
 	BindConsoleMessage();
