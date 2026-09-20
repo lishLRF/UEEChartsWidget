@@ -626,7 +626,6 @@ void UEChartsWidget::BeginOptionBarrier()
 {
 	if (bOptionBarrierActive) return;
 	bOptionBarrierActive = true;
-	bOptionBarrierResumeDataTable = DataTableLoadState == EEChartsDataTableLoadState::Reading && DataTableSnapshot.IsValid();
 	CancelStreamTicker();
 	if (DataTableTickerHandle.IsValid())
 	{
@@ -655,7 +654,7 @@ void UEChartsWidget::ResolveOptionBarrier(const bool bCommit)
 	}
 	else
 	{
-		if (bOptionBarrierResumeDataTable && DataTableLoadState == EEChartsDataTableLoadState::Reading &&
+		if (!bStreamingSuspended && DataTableLoadState == EEChartsDataTableLoadState::Reading &&
 			DataTableSnapshot.IsValid() && !DataTableTickerHandle.IsValid())
 		{
 			const uint64 Request = DataTableRequest;
@@ -666,7 +665,6 @@ void UEChartsWidget::ResolveOptionBarrier(const bool bCommit)
 		if (bApplyRequested && RuntimeState == EEChartsRuntimeState::Ready && InFlightRevision == 0) SubmitLatestData();
 		else ScheduleAutoApply();
 	}
-	bOptionBarrierResumeDataTable = false;
 }
 
 void UEChartsWidget::SendInteractionMode()
@@ -1085,7 +1083,6 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				LastDataTableError = Error;
 			}
 			bOptionBarrierActive = false;
-			bOptionBarrierResumeDataTable = false;
 			OnEChartsError.Broadcast(LastError);
 		}
 	}

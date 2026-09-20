@@ -293,6 +293,11 @@ public:
 	}
 	int64 GetPendingOptionRequestIdForTesting() const { return static_cast<int64>(PendingOptionRequestId); }
 	int64 GetPendingInteractionRequestIdForTesting() const { return static_cast<int64>(PendingInteractionRequestId); }
+	void SetOptionAtStreamSortStartForTesting(const FString& OptionJson, bool bReleaseAndPrepareRebuild)
+	{
+		OptionAtStreamSortStartForTesting = OptionJson;
+		bReleaseAtStreamSortStartForTesting = bReleaseAndPrepareRebuild;
+	}
 #endif
 
 protected:
@@ -399,7 +404,6 @@ private:
 	bool bOptionReplayPending = false;
 	bool bInteractionReplayPending = false;
 	bool bOptionBarrierActive = false;
-	bool bOptionBarrierResumeDataTable = false;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
 	int32 DataTableWorkerSnapshotPointCountForTesting = 0;
@@ -412,6 +416,8 @@ private:
 	int32 StreamCategorySortKeyCopyCountForTesting = 0;
 	bool bReportSeriesCountForTesting = false;
 	FString InitializationPayloadForTesting = TEXT("{}");
+	FString OptionAtStreamSortStartForTesting;
+	bool bReleaseAtStreamSortStartForTesting = false;
 #endif
 };
 

@@ -85,6 +85,20 @@ bool UEChartsWidget::StartDataTableStreaming(float IntervalSeconds, int32 RowsPe
 void UEChartsWidget::SortStreamRowNames(const uint64 Request)
 {
 	DataTableLoadState = EEChartsDataTableLoadState::Processing;
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+	if (!OptionAtStreamSortStartForTesting.IsEmpty())
+	{
+		const FString Option = MoveTemp(OptionAtStreamSortStartForTesting);
+		OptionAtStreamSortStartForTesting.Reset();
+		SetEChartsOptionJSON(Option);
+		if (bReleaseAtStreamSortStartForTesting)
+		{
+			bReleaseAtStreamSortStartForTesting = false;
+			ReleaseSlateResources(false);
+			PrepareRebuildForTesting();
+		}
+	}
+#endif
 	auto Snapshot = DataTableSnapshot;
 	auto SortKeys = MoveTemp(Snapshot->Rows);
 	const bool bCategory = Snapshot->bCategory;

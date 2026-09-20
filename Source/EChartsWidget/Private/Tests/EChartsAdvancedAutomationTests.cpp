@@ -395,6 +395,83 @@ namespace EChartsAdvancedTests
 		int32 Stage = 0;
 		int64 SavedRows = 0;
 	};
+
+	class FOptionBarrierProcessingCommand final : public IAutomationLatentCommand
+	{
+	public:
+		FOptionBarrierProcessingCommand(FAutomationTestBase* InTest, const bool bInRebuild)
+			: Test(InTest), bRebuild(bInRebuild) {}
+		virtual bool Update() override
+		{
+			if (!Widget)
+			{
+				Deadline = FPlatformTime::Seconds() + 15.0;
+				Widget = MakeWidget(); Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+				Widget->OnOptionApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleOptionApplied);
+				Widget->OnDataTableStreamingStarted.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleStreamStarted);
+				Widget->OnDataTableStreamingStopped.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleStreamStopped);
+				Widget->OnDataTableLoadCancelled.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleTableCancelled);
+				Widget->InitializeECharts(); Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+				UDataTable* Table = NewObject<UDataTable>(); Table->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+				for (int32 I = 0; I < 200; ++I) { FEChartsDataTableTestRow Row; Row.X = I; Row.Y = I; Table->AddRow(FName(*FString::FromInt(I)), Row); }
+				FEChartsDataTableMapping Mapping; Mapping.X = TEXT("X"); Mapping.Y = TEXT("Y");
+				Widget->SetDataTableMapping(Table, Mapping); Widget->SetTimeSeriesEnabled(true); Widget->SetTimeSeriesWindow(20);
+				Widget->SetOptionAtStreamSortStartForTesting(TEXT("{\"title\":{\"text\":\"processing-candidate\"}}"), bRebuild);
+				Test->TestTrue(TEXT("Processing barrier stream starts"), Widget->StartDataTableStreaming(0.01f, 1, true, 200));
+				return false;
+			}
+			if (FPlatformTime::Seconds() >= Deadline) { Test->AddError(TEXT("Processing option barrier stream timeout")); Cleanup(); return true; }
+			if (bRebuild && !bReadyForRebuild && Widget->RuntimeState == EEChartsRuntimeState::Loading)
+			{
+				bReadyForRebuild = true;
+				Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+			}
+			if (Stage == 0 && Widget->GetPendingOptionRequestIdForTesting() > 0)
+			{
+				const int64 Request = Widget->GetPendingOptionRequestIdForTesting();
+				const int32 Generation = bRebuild ? 2 : 1;
+				if (bRebuild)
+				{
+					Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:stale"), Request), FString(), 0);
+					Test->TestEqual(TEXT("Processing rebuild ignores old-generation result"), Sink->OptionResultCount, 0);
+					Test->TestEqual(TEXT("Old result leaves new request in flight"), Widget->GetPendingOptionRequestIdForTesting(), Request);
+				}
+				Test->TestEqual(TEXT("Worker completes Processing into Reading"), Widget->DataTableLoadState, EEChartsDataTableLoadState::Reading);
+				Test->TestEqual(TEXT("Stream remains Preparing behind candidate"), Widget->StreamState, EEChartsDataTableStreamState::Preparing);
+				Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:%d:%lld:0:failed; previous chart restored"), Generation, Request), FString(), 0);
+				Test->TestEqual(TEXT("Processing candidate failure remains Ready"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
+				Test->TestEqual(TEXT("Processing candidate emits no Stopped"), Sink->StreamStoppedCount, 0);
+				Test->TestEqual(TEXT("Processing candidate emits no Cancelled"), Sink->TableCancelledCount, 0);
+				Test->TestTrue(TEXT("Processing failure restores one reading ticker"), Widget->IsDataTablePrepareScheduledForTesting());
+				Stage = 1; return false;
+			}
+			if (Stage == 1)
+			{
+				if (Widget->IsApplyInFlightForTesting()) Widget->AcknowledgeCurrentApplyForTesting();
+				if (Widget->StreamState == EEChartsDataTableStreamState::Playing && Widget->StreamedRows > 0)
+				{
+					Test->TestEqual(TEXT("Processing recovery starts stream once"), Sink->StreamStartedCount, 1);
+					Test->TestEqual(TEXT("Processing recovery emits no Stopped"), Sink->StreamStoppedCount, 0);
+					Test->TestEqual(TEXT("Processing recovery emits no Cancelled"), Sink->TableCancelledCount, 0);
+					Cleanup(); return true;
+				}
+			}
+			return false;
+		}
+	private:
+		void Cleanup()
+		{
+			if (Widget) { Widget->StopDataTableStreaming(); DestroyWidget(Widget); Widget = nullptr; }
+			if (Sink) { Sink->RemoveFromRoot(); Sink = nullptr; }
+		}
+		FAutomationTestBase* Test;
+		UEChartsWidget* Widget = nullptr;
+		UEChartsWidgetTestSink* Sink = nullptr;
+		double Deadline = 0.0;
+		int32 Stage = 0;
+		bool bRebuild = false;
+		bool bReadyForRebuild = false;
+	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAdvancedReflectionTest,
@@ -678,6 +755,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierPlayingStreamTest,
 bool FEChartsOptionBarrierPlayingStreamTest::RunTest(const FString& Parameters)
 {
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionBarrierStreamCommand(this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierProcessingTest,
+	"EChartsWidget.Advanced.OptionBarrierProcessing", EChartsAdvancedTests::Flags)
+bool FEChartsOptionBarrierProcessingTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionBarrierProcessingCommand(this, false));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionBarrierProcessingRebuildTest,
+	"EChartsWidget.Advanced.OptionBarrierProcessingRebuild", EChartsAdvancedTests::Flags)
+bool FEChartsOptionBarrierProcessingRebuildTest::RunTest(const FString& Parameters)
+{
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionBarrierProcessingCommand(this, true));
 	return true;
 }
 
