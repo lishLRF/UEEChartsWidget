@@ -16,6 +16,16 @@ enum class EEChartsDataTableOrder : uint8
 	RowName
 };
 UENUM(BlueprintType)
+enum class EEChartsDataTableStreamState : uint8
+{
+	Stopped,
+	Preparing,
+	Playing,
+	Paused,
+	Completed,
+	Error
+};
+UENUM(BlueprintType)
 enum class EEChartsDataTableLoadState : uint8
 {
 	Idle,

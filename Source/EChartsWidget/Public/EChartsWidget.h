@@ -41,6 +41,34 @@ public:
 
 	UEChartsWidget(const FObjectInitializer& ObjectInitializer);
 
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDataTableStreamingEvent);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDataTableStreamProgress, int32, Current, int32, Total, int64, Loop);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDataTableStreamLooped, int64, Loop);
+	UFUNCTION(BlueprintCallable, Category="ECharts|Streaming", meta=(DisplayName="Set Time Series Enabled"))
+	void SetTimeSeriesEnabled(bool bEnabled);
+	UFUNCTION(BlueprintCallable, Category="ECharts|Streaming", meta=(DisplayName="Set Time Series Window"))
+	void SetTimeSeriesWindow(int32 MaxVisiblePoints);
+	UFUNCTION(BlueprintCallable, Category="ECharts|Streaming", meta=(DisplayName="Start Data Table Streaming"))
+	bool StartDataTableStreaming(float IntervalSeconds = 0.1f, int32 RowsPerStep = 1, bool Loop = false, int32 PreparationRowsPerFrame = 256);
+	UFUNCTION(BlueprintCallable, Category="ECharts|Streaming", meta=(DisplayName="Pause Data Table Streaming"))
+	void PauseDataTableStreaming();
+	UFUNCTION(BlueprintCallable, Category="ECharts|Streaming", meta=(DisplayName="Resume Data Table Streaming"))
+	void ResumeDataTableStreaming();
+	UFUNCTION(BlueprintCallable, Category="ECharts|Streaming", meta=(DisplayName="Stop Data Table Streaming"))
+	void StopDataTableStreaming();
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|Streaming") bool bTimeSeriesEnabled = false;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|Streaming") int32 TimeSeriesWindow = 1000;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|Streaming") EEChartsDataTableStreamState StreamState = EEChartsDataTableStreamState::Stopped;
+	/** Next prepared row to append (zero based), or total rows while awaiting final ACK. */
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|Streaming") int32 CurrentRow = 0;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|Streaming") int64 LoopCount = 0;
+	UPROPERTY(BlueprintReadOnly, Category="ECharts|Streaming") int64 StreamedRows = 0;
+	UPROPERTY(BlueprintAssignable, Category="ECharts|Event") FOnDataTableStreamingEvent OnDataTableStreamingStarted;
+	UPROPERTY(BlueprintAssignable, Category="ECharts|Event") FOnDataTableStreamProgress OnDataTableStreamProgress;
+	UPROPERTY(BlueprintAssignable, Category="ECharts|Event") FOnDataTableStreamLooped OnDataTableStreamLooped;
+	UPROPERTY(BlueprintAssignable, Category="ECharts|Event") FOnDataTableStreamingEvent OnDataTableStreamingCompleted;
+	UPROPERTY(BlueprintAssignable, Category="ECharts|Event") FOnDataTableStreamingEvent OnDataTableStreamingStopped;
+
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDataTableLoadProgress, int32, Processed, int32, Total);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDataTableLoaded, int32, Succeeded, int32, Skipped);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDataTableLoadCancelled);
@@ -200,6 +228,13 @@ public:
 	void SetInitializationPayloadForTesting(const FString& PayloadJson, bool bReportSeriesCount);
 	bool IsAutoApplyScheduledForTesting() const;
 	int32 GetDataTableWorkerSnapshotPointCountForTesting() const { return DataTableWorkerSnapshotPointCountForTesting; }
+	bool IsDataTableStreamScheduledForTesting() const { return StreamTickerHandle.IsValid(); }
+	bool IsDataTablePrepareScheduledForTesting() const { return DataTableTickerHandle.IsValid(); }
+	float GetStreamIntervalForTesting() const { return StreamInterval; }
+	int32 GetStreamRowsPerStepForTesting() const { return StreamRowsPerStep; }
+	int32 GetPreparedStreamCountForTesting() const { return PreparedStreamRows.Num(); }
+	int32 GetStreamTickCallsForTesting() const { return StreamTickCallsForTesting; }
+	uint32 GetNumericStreamAllocatedBytesForTesting() const { return SeriesData[0].Numeric2D.GetAllocatedSize(); }
 #endif
 
 protected:
@@ -225,6 +260,26 @@ private:
 	void FailDataTableLoad(const FString& Error);
 	bool ReadDataTableBatch(uint64 Request);
 	void ProcessDataTableSnapshot(uint64 Request);
+	bool IsStreamingActive() const;
+	void StopStreaming(bool bNotify);
+	void CancelStreamTicker();
+	void ScheduleStreamTicker();
+	bool StreamStep(uint64 Request);
+	void PrepareStreamRows(uint64 Request);
+	void FailStreaming(const FString& Error);
+	void CompleteStreamIfAcknowledged(int64 Revision);
+	void TrimStreamWindow();
+	void ResumeStreamingAfterRebuild();
+	FEChartsSeriesData PreparedStreamRows;
+	FTSTicker::FDelegateHandle StreamTickerHandle;
+	uint64 StreamRequest = 0;
+	uint64 LastStreamFrame = MAX_uint64;
+	float StreamInterval = 0.1f;
+	int32 StreamRowsPerStep = 1;
+	bool bStreamLoop = false;
+	bool bStreamingSuspended = false;
+	bool bPreserveStreamCategoryOrder = false;
+	int64 StreamFinalRevision = 0;
 	UPROPERTY(Transient) TObjectPtr<UDataTable> MappedDataTable;
 	FEChartsDataTableMapping DataTableMapping;
 	TSharedPtr<struct FEChartsDataTableSnapshot> DataTableSnapshot;
@@ -254,6 +309,7 @@ private:
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	bool bForceWebGLUnavailableForTesting = false;
 	int32 DataTableWorkerSnapshotPointCountForTesting = 0;
+	int32 StreamTickCallsForTesting = 0;
 	bool bReportSeriesCountForTesting = false;
 	FString InitializationPayloadForTesting = TEXT("{}");
 #endif

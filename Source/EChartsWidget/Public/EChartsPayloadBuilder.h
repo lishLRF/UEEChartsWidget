@@ -18,7 +18,8 @@ public:
 		int64 Revision,
 		FString& OutBase64,
 		int32& OutPointCount,
-		FString& OutError);
+		FString& OutError,
+		bool bPreserveCategoryOrder = false);
 
 	static bool DecodeBase64Payload(const FString& Base64, FString& OutJson, FString& OutError);
 

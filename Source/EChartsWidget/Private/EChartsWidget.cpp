@@ -96,8 +96,10 @@ int32 UEChartsWidget::GetTotalPointCount() const
 
 bool UEChartsWidget::CanReplacePointCount(const int32 SeriesIndex, const int32 NewSeriesPointCount) const
 {
+	const int32 BoundedCount = SeriesIndex == 0 && IsStreamingActive() && bTimeSeriesEnabled
+		? FMath::Min(NewSeriesPointCount, TimeSeriesWindow) : NewSeriesPointCount;
 	return IsValidSeriesIndex(SeriesIndex) && NewSeriesPointCount >= 0 &&
-		GetTotalPointCount() - SeriesData[SeriesIndex].Num() + NewSeriesPointCount <= FEChartsPayloadBuilder::MaxPointCount;
+		GetTotalPointCount() - SeriesData[SeriesIndex].Num() + BoundedCount <= FEChartsPayloadBuilder::MaxPointCount;
 }
 
 void UEChartsWidget::ReportDataError(const FString& Message)
@@ -108,6 +110,7 @@ void UEChartsWidget::ReportDataError(const FString& Message)
 
 void UEChartsWidget::MarkDataChanged()
 {
+	TrimStreamWindow();
 	if (!bInstallingDataTable && DataTableLoadState == EEChartsDataTableLoadState::Applying)
 	{
 		DataTableApplyRevision = 0;
@@ -180,16 +183,20 @@ bool UEChartsWidget::SetSeriesData(const int32 SeriesIndex, const TArray<FEChart
 	{
 		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y)) return false;
 	}
-	if (!CanReplacePointCount(SeriesIndex, Data.Num()))
+	if (GetTotalPointCount() - SeriesData[SeriesIndex].Num() + Data.Num() > FEChartsPayloadBuilder::MaxPointCount)
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
 	}
+	const bool bStopped = !bInstallingDataTable && IsStreamingActive();
+	if (bStopped) StopStreaming(false);
 	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
 	Series.ResetData();
 	Series.Type = EEChartsSeriesDataType::Numeric2D;
 	Series.Numeric2D = Data;
+	if (SeriesIndex == 0) bPreserveStreamCategoryOrder = false;
 	MarkDataChanged();
+	if (bStopped) OnDataTableStreamingStopped.Broadcast();
 	return true;
 }
 
@@ -228,16 +235,20 @@ bool UEChartsWidget::SetCategorySeriesData(const int32 SeriesIndex, const TArray
 	{
 		if (Point.X.TrimStartAndEnd().IsEmpty() || !FMath::IsFinite(Point.Y)) return false;
 	}
-	if (!CanReplacePointCount(SeriesIndex, Data.Num()))
+	if (GetTotalPointCount() - SeriesData[SeriesIndex].Num() + Data.Num() > FEChartsPayloadBuilder::MaxPointCount)
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
 	}
+	const bool bStopped = !bInstallingDataTable && IsStreamingActive();
+	if (bStopped) StopStreaming(false);
 	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
 	Series.ResetData();
 	Series.Type = EEChartsSeriesDataType::Category;
 	Series.Category = Data;
+	if (SeriesIndex == 0) bPreserveStreamCategoryOrder = false;
 	MarkDataChanged();
+	if (bStopped) OnDataTableStreamingStopped.Broadcast();
 	return true;
 }
 
@@ -277,16 +288,20 @@ bool UEChartsWidget::Set3DData(const int32 SeriesIndex, const TArray<FEChartsDat
 		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y) || !FMath::IsFinite(Point.Z) ||
 			!FMath::IsFinite(Point.ColorValue) || !FMath::IsFinite(Point.SymbolSizeValue)) return false;
 	}
-	if (!CanReplacePointCount(SeriesIndex, Data.Num()))
+	if (GetTotalPointCount() - SeriesData[SeriesIndex].Num() + Data.Num() > FEChartsPayloadBuilder::MaxPointCount)
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
 	}
+	const bool bStopped = !bInstallingDataTable && IsStreamingActive();
+	if (bStopped) StopStreaming(false);
 	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
 	Series.ResetData();
 	Series.Type = EEChartsSeriesDataType::Data3D;
 	Series.Data3D = Data;
+	if (SeriesIndex == 0) bPreserveStreamCategoryOrder = false;
 	MarkDataChanged();
+	if (bStopped) OnDataTableStreamingStopped.Broadcast();
 	return true;
 }
 
@@ -324,19 +339,23 @@ bool UEChartsWidget::ClearSeries(const int32 SeriesIndex)
 	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex)) return false;
 	SeriesData[SeriesIndex].ResetData();
 	SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Unset;
+	if (SeriesIndex == 0) bPreserveStreamCategoryOrder = false;
 	MarkDataChanged();
+	StopDataTableStreaming();
 	return true;
 }
 
 void UEChartsWidget::ClearAll()
 {
 	if (!IsGameThreadMutation()) return;
+	bPreserveStreamCategoryOrder = false;
 	for (FEChartsSeriesData& Series : SeriesData)
 	{
 		Series.ResetData();
 		Series.Type = EEChartsSeriesDataType::Unset;
 	}
 	MarkDataChanged();
+	StopDataTableStreaming();
 }
 
 bool UEChartsWidget::SetSeriesName(const int32 SeriesIndex, const FString& Name)
@@ -403,9 +422,10 @@ void UEChartsWidget::SubmitLatestData()
 		PointCount = GetTotalPointCount();
 	}
 	else if (!FEChartsPayloadBuilder::BuildBase64Payload(
-		CurrentTemplate, XAxisMode, SeriesData, DataRevision, PayloadBase64, PointCount, Error))
+		CurrentTemplate, XAxisMode, SeriesData, DataRevision, PayloadBase64, PointCount, Error, bPreserveStreamCategoryOrder))
 	{
 		bApplyRequested = false;
+		if (IsStreamingActive()) { FailStreaming(Error); return; }
 		ReportDataError(Error);
 		return;
 	}
@@ -451,6 +471,7 @@ void UEChartsWidget::InitializeECharts(
 	const EEChartsTemplate Template,
 	const EEChartsInteractionMode InInteractionMode)
 {
+	if (Template != CurrentTemplate) StopDataTableStreaming();
 	if (Template != DataTableRequestTemplate &&
 		(DataTableLoadState == EEChartsDataTableLoadState::Reading ||
 		 DataTableLoadState == EEChartsDataTableLoadState::Processing ||
@@ -509,7 +530,14 @@ void UEChartsWidget::BeginLoadGeneration()
 
 void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 {
-	StopDataTableLoad(false);
+	bStreamingSuspended = true;
+	CancelStreamTicker();
+	if (StreamState == EEChartsDataTableStreamState::Preparing)
+	{
+		if (DataTableTickerHandle.IsValid()) FTSTicker::GetCoreTicker().RemoveTicker(DataTableTickerHandle);
+		DataTableTickerHandle.Reset();
+	}
+	else StopDataTableLoad(false);
 	CancelAutoApply();
 	if (InFlightRevision != 0)
 	{
@@ -529,6 +557,7 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 
 void UEChartsWidget::BeginDestroy()
 {
+	StopStreaming(false);
 	StopDataTableLoad(false);
 	CancelAutoApply();
 	Super::BeginDestroy();
@@ -548,6 +577,7 @@ void UEChartsWidget::PrepareAutomaticRebuild()
 		bReloadOnRebuild = false;
 		BeginLoadGeneration();
 	}
+	ResumeStreamingAfterRebuild();
 }
 
 void UEChartsWidget::HandleEChartsConsoleMessage(
@@ -618,6 +648,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				bHasDataTableCacheSnapshot = false;
 				OnDataTableLoaded.Broadcast(Succeeded, Skipped);
 			}
+			CompleteStreamIfAcknowledged(MessageRevision);
 			OnEChartsApplied.Broadcast(MessageRevision, MessagePointCount);
 			if (bApplyRequested && bIsDirty)
 			{
@@ -676,6 +707,11 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		{
 			LastError = Error;
 			RuntimeState = EEChartsRuntimeState::Error;
+			if (IsStreamingActive())
+			{
+				StopStreaming(false);
+				StreamState = EEChartsDataTableStreamState::Error;
+			}
 			if (DataTableLoadState == EEChartsDataTableLoadState::Reading || DataTableLoadState == EEChartsDataTableLoadState::Processing || DataTableLoadState == EEChartsDataTableLoadState::Applying)
 			{
 				StopDataTableLoad(false);

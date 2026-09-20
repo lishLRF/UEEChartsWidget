@@ -222,7 +222,8 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 	const int64 Revision,
 	FString& OutBase64,
 	int32& OutPointCount,
-	FString& OutError)
+	FString& OutError,
+	const bool bPreserveCategoryOrder)
 {
 	OutBase64.Reset();
 	OutPointCount = 0;
@@ -240,6 +241,7 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 	Root->SetNumberField(TEXT("revision"), static_cast<double>(Revision));
 	Root->SetStringField(TEXT("template"), TemplateName(Template));
 	Root->SetStringField(TEXT("xAxisMode"), XAxisModeName(XAxisMode));
+	if (bPreserveCategoryOrder) Root->SetBoolField(TEXT("preserveCategoryOrder"), true);
 
 	TArray<TSharedPtr<FJsonValue>> JsonSeries;
 	JsonSeries.Reserve(MaxSeriesCount);

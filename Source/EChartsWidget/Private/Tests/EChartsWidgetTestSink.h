@@ -11,6 +11,28 @@ class UEChartsWidgetTestSink : public UObject
 	GENERATED_BODY()
 
 public:
+	UFUNCTION() void HandleStreamStarted() { ++StreamStartedCount; }
+	UFUNCTION() void HandleStreamStopped() { ++StreamStoppedCount; }
+	UFUNCTION() void HandleStreamCompleted() { ++StreamCompletedCount; }
+	UFUNCTION() void HandleStreamLooped(int64 Loop) { ++StreamLoopedCount; }
+	UFUNCTION() void HandleStreamProgress(int32 Current, int32 Total, int64 Loop)
+	{
+		++StreamProgressCount;
+		if (StreamProgressFrame == GFrameCounter) ++StreamSameFrameCount;
+		StreamProgressFrame = GFrameCounter;
+		if (StreamCallbackWidget.IsValid())
+		{
+			UEChartsWidget* W = StreamCallbackWidget.Get();
+			if (StreamCallbackAction == 1) W->PauseDataTableStreaming();
+			if (StreamCallbackAction == 2) W->StopDataTableStreaming();
+			if (StreamCallbackAction == 3 && StreamRestartsRemaining-- > 0) W->StartDataTableStreaming(0.01f, 1, true, 1);
+			if (StreamCallbackAction == 4) { W->PauseDataTableStreaming(); W->ResumeDataTableStreaming(); }
+		}
+	}
+	int32 StreamStartedCount = 0, StreamStoppedCount = 0, StreamCompletedCount = 0, StreamLoopedCount = 0;
+	int32 StreamProgressCount = 0, StreamSameFrameCount = 0, StreamCallbackAction = 0, StreamRestartsRemaining = 0;
+	uint64 StreamProgressFrame = MAX_uint64;
+	TWeakObjectPtr<UEChartsWidget> StreamCallbackWidget;
 	UFUNCTION()
 	void HandleTableProgress(int32 Processed, int32 Total)
 	{

@@ -13,6 +13,7 @@ bool UEChartsWidget::SetDataTableMapping(UDataTable* Table, const FEChartsDataTa
 {
 	if (!IsInGameThread())
 		return false;
+	StopDataTableStreaming();
 	StopDataTableLoad(false);
 	bool bCategory = false;
 	FString Error;
@@ -32,6 +33,7 @@ void UEChartsWidget::LoadDataTable(int32 RowsPerFrame)
 {
 	if (!IsInGameThread())
 		return;
+	StopDataTableStreaming();
 	StopDataTableLoad(false);
 	RowsProcessed = RowsSucceeded = RowsSkipped = TotalRows = 0;
 	LastDataTableError.Reset();
@@ -105,7 +107,7 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 		CancelDataTableLoad();
 		return false;
 	}
-	if (RowsSucceeded > FEChartsPayloadBuilder::MaxPointCount)
+	if (StreamState != EEChartsDataTableStreamState::Preparing && RowsSucceeded > FEChartsPayloadBuilder::MaxPointCount)
 	{
 		FailDataTableLoad(TEXT("DataTable exceeds the 100000 point limit."));
 		return false;
@@ -119,6 +121,11 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 {
 	check(IsInGameThread());
+	if (StreamState == EEChartsDataTableStreamState::Preparing)
+	{
+		PrepareStreamRows(Request);
+		return;
+	}
 	DataTableLoadState = EEChartsDataTableLoadState::Processing;
 	auto S = MoveTemp(DataTableSnapshot);
 	TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> Series;
@@ -247,10 +254,20 @@ void UEChartsWidget::StopDataTableLoad(bool bNotify)
 void UEChartsWidget::CancelDataTableLoad()
 {
 	if (IsInGameThread())
+	{
+		if (StreamState == EEChartsDataTableStreamState::Preparing) StopDataTableStreaming();
 		StopDataTableLoad(true);
+	}
 }
 void UEChartsWidget::FailDataTableLoad(const FString& Error)
 {
+	if (StreamState == EEChartsDataTableStreamState::Preparing)
+	{
+		FailStreaming(Error);
+		LastDataTableError = Error;
+		DataTableLoadState = EEChartsDataTableLoadState::Error;
+		return;
+	}
 	StopDataTableLoad(false);
 	LastDataTableError = Error;
 	DataTableLoadState = EEChartsDataTableLoadState::Error;

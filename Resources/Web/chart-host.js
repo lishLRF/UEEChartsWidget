@@ -97,15 +97,21 @@
       const oldSeries = Array.isArray(option.series) ? option.series : (option.series ? [option.series] : []);
       const categoryLabels = [];
       const categoryLabelSet = new Set();
-      payload.series.forEach(function (series) {
-        if (series.type !== 'category') return;
-        series.data.forEach(function (point) {
-          if (!categoryLabelSet.has(point[0])) {
-            categoryLabelSet.add(point[0]);
-            categoryLabels.push(point[0]);
-          }
+      const orderedCategoryWindow = payload.preserveCategoryOrder === true &&
+        payload.series.length > 0 && payload.series[0].type === 'category';
+      if (orderedCategoryWindow) {
+        payload.series[0].data.forEach(function (point) { categoryLabels.push(point[0]); });
+      } else {
+        payload.series.forEach(function (series) {
+          if (series.type !== 'category') return;
+          series.data.forEach(function (point) {
+            if (!categoryLabelSet.has(point[0])) {
+              categoryLabelSet.add(point[0]);
+              categoryLabels.push(point[0]);
+            }
+          });
         });
-      });
+      }
       const useHeatmapAxes = currentEffectiveTemplate === 'Bar3DHeightMap2D' &&
         payload.series.some(function (series) { return series.type === 'data3D'; });
       const heatmapXDomain = [];
@@ -143,7 +149,9 @@
           const valuesByLabel = new Map();
           input.data.forEach(function (point) { valuesByLabel.set(point[0], point[1]); });
           output.type = 'line';
-          output.data = categoryLabels.map(function (label) {
+          output.data = orderedCategoryWindow && index === 0
+            ? input.data.map(function (point) { return point[1]; })
+            : categoryLabels.map(function (label) {
             return valuesByLabel.has(label) ? valuesByLabel.get(label) : null;
           });
         } else if (input.type === 'data3D') {

@@ -214,6 +214,27 @@ test('duplicate category labels use the last value in the same series', () => {
   assert.equal(JSON.stringify(appliedOption.series[0].data), JSON.stringify([9, 2]));
 });
 
+test('stream category windows retain repeated X labels in append order across looping replacements', () => {
+  const state = createHostContext();
+  let option;
+  state.window.UEEChartsTemplates.createTemplate = (template) => ({
+    requestedTemplate: template, effectiveTemplate: template, option: { xAxis: {}, yAxis: {}, series: [] },
+  });
+  state.window.echarts.init = () => ({ clear() {}, resize() {}, dispose() {}, setOption(value) { option = value; } });
+  vm.runInContext(hostSource, state.context);
+  state.window.UEEChartsHost.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  for (let revision = 1; revision <= 100; revision += 1) {
+    const data = revision % 2 ? [['A', 1], ['B', 2], ['A', 3]] : [['B', 2], ['A', 3], ['B', 4]];
+    assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload({
+      revision, template: 'SegmentedAreaLine', xAxisMode: 'Category', preserveCategoryOrder: true,
+      series: [{ index: 0, name: 'Stream', type: 'category', data }],
+    })), true);
+    assert.equal(JSON.stringify(option.xAxis.data), JSON.stringify(data.map(point => point[0])));
+    assert.equal(JSON.stringify(option.series[0].data), JSON.stringify(data.map(point => point[1])));
+    assert.equal(option.series[0].data.length, 3);
+  }
+});
+
 test('3D data maps by the current effective template including WebGL fallbacks', () => {
   const cases = [
     { requested: 'Bar3DHeightMap', effective: 'Bar3DHeightMap', expectedType: 'bar3D', hasGrid3D: true },
