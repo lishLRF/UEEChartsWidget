@@ -204,6 +204,7 @@ bool FEChartsStreamingSourceLimitTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("Stream rejects more than 100000 source rows before preparation"), W->StartDataTableStreaming());
     TestEqual(TEXT("Oversized source enters Error state"), W->StreamState, EEChartsDataTableStreamState::Error);
     TestFalse(TEXT("Oversized source never schedules preparation"), W->IsDataTablePrepareScheduledForTesting());
+    TestEqual(TEXT("Oversized source is rejected before DataTable snapshot/GetRowNames"), W->GetDataTableSnapshotCreationCountForTesting(), 0);
     TStrongObjectPtr<UDataTable> LongCategoryTable(NewObject<UDataTable>());
     LongCategoryTable->RowStruct = FEChartsDataTableTestRow::StaticStruct();
     FEChartsDataTableTestRow LongRow;
@@ -216,6 +217,7 @@ bool FEChartsStreamingSourceLimitTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Long category source fails the byte budget before prepared caching"),
         W->StreamState, EEChartsDataTableStreamState::Error);
     TestEqual(TEXT("Long category is never retained in prepared source"), W->GetPreparedStreamCountForTesting(), 0);
+    TestEqual(TEXT("Long FString is rejected before copying a category sort key"), W->GetStreamCategorySortKeyCopyCountForTesting(), 0);
     W->ReleaseSlateResources(false);
     return true;
 }
@@ -293,6 +295,113 @@ bool FEChartsStreamingRebuildTest::RunTest(const FString& Parameters)
     return true;
 }
 
+class FEChartsStreamBackpressureReentryCommand : public IAutomationLatentCommand
+{
+    FAutomationTestBase* Test;
+    TStrongObjectPtr<UEChartsWidget> W;
+    TStrongObjectPtr<UEChartsWidgetTestSink> S;
+    double Start = 0, BackpressureStart = 0;
+    int32 SavedTicks = 0;
+    bool bObserved = false;
+public:
+    explicit FEChartsStreamBackpressureReentryCommand(FAutomationTestBase* T) : Test(T) {}
+    virtual bool Update() override
+    {
+        if (!W.IsValid())
+        {
+            Start = FPlatformTime::Seconds(); W.Reset(NewObject<UEChartsWidget>()); S.Reset(NewObject<UEChartsWidgetTestSink>());
+            W->InitializeECharts(); W->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+            W->SetTimeSeriesEnabled(true);
+            UDataTable* Table = NewObject<UDataTable>(); Table->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+            for (int32 I = 0; I < 10; ++I) { FEChartsDataTableTestRow R; R.X = I; Table->AddRow(FName(*FString::FromInt(I)), R); }
+            FEChartsDataTableMapping M; M.X = TEXT("X"); M.Y = TEXT("Y"); W->SetDataTableMapping(Table, M);
+            S->StreamCallbackWidget = W.Get(); S->StreamCallbackAction = 4; S->StreamCallbackAfterProgressCount = 3;
+            W->OnDataTableStreamProgress.AddDynamic(S.Get(), &UEChartsWidgetTestSink::HandleStreamProgress);
+            W->StartDataTableStreaming(0.01f, 1, true, 10);
+            return false;
+        }
+        if (FPlatformTime::Seconds() - Start > 10) { Test->AddError(TEXT("Backpressure reentry timeout")); W->StopDataTableStreaming(); return true; }
+        if (!bObserved && S->StreamProgressCount >= 3)
+        {
+            bObserved = true; BackpressureStart = FPlatformTime::Seconds(); SavedTicks = W->GetStreamTickCallsForTesting();
+            Test->TestTrue(TEXT("Two unacknowledged delta batches reach browser backpressure"), W->GetPendingStreamDeltaCountForTesting() >= 2);
+        }
+        if (bObserved && FPlatformTime::Seconds() - BackpressureStart > 0.1)
+        {
+            Test->TestTrue(TEXT("Reentrant pause/resume never grows the bounded delta queue"), W->GetPendingStreamDeltaCountForTesting() <= 2);
+            Test->TestEqual(TEXT("No orphan ticker runs after backpressure"), W->GetStreamTickCallsForTesting(), SavedTicks);
+            W->StopDataTableStreaming();
+            Test->TestFalse(TEXT("Stop leaves no tracked ticker"), W->IsDataTableStreamScheduledForTesting());
+            W->ReleaseSlateResources(false); return true;
+        }
+        return false;
+    }
+};
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsStreamingBackpressureReentryTest, "EChartsWidget.Streaming.BackpressureReentry",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsStreamingBackpressureReentryTest::RunTest(const FString& Parameters)
+{
+    ADD_LATENT_AUTOMATION_COMMAND(FEChartsStreamBackpressureReentryCommand(this));
+    return true;
+}
+
+class FEChartsStreamRevisionWrapCommand : public IAutomationLatentCommand
+{
+    FAutomationTestBase* Test;
+    TStrongObjectPtr<UEChartsWidget> W;
+    TStrongObjectPtr<UEChartsWidgetTestSink> S;
+    int32 Stage = 0, ProgressAtWrap = 0;
+    double Start = 0;
+public:
+    explicit FEChartsStreamRevisionWrapCommand(FAutomationTestBase* T) : Test(T) {}
+    virtual bool Update() override
+    {
+        if (!W.IsValid())
+        {
+            Start = FPlatformTime::Seconds(); W.Reset(NewObject<UEChartsWidget>()); S.Reset(NewObject<UEChartsWidgetTestSink>());
+            W->InitializeECharts(); W->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+            W->SetTimeSeriesEnabled(true);
+            UDataTable* Table = NewObject<UDataTable>(); Table->RowStruct = FEChartsDataTableTestRow::StaticStruct();
+            for (int32 I = 0; I < 4; ++I) { FEChartsDataTableTestRow R; R.X = I; Table->AddRow(FName(*FString::FromInt(I)), R); }
+            FEChartsDataTableMapping M; M.X = TEXT("X"); M.Y = TEXT("Y"); W->SetDataTableMapping(Table, M);
+            W->OnDataTableStreamProgress.AddDynamic(S.Get(), &UEChartsWidgetTestSink::HandleStreamProgress);
+            W->StartDataTableStreaming(0.01f, 1, true, 4); return false;
+        }
+        if (FPlatformTime::Seconds() - Start > 10) { Test->AddError(TEXT("Revision wrap timeout")); W->StopDataTableStreaming(); return true; }
+        if (W->RuntimeState == EEChartsRuntimeState::Error || W->StreamState == EEChartsDataTableStreamState::Error)
+        {
+            Test->AddError(TEXT("Revision wrap must not enter Error before forcing a full payload"));
+            W->StopDataTableStreaming(); W->ReleaseSlateResources(false); return true;
+        }
+        if (Stage == 0 && S->StreamProgressCount >= 1 && W->IsApplyInFlightForTesting())
+        {
+            W->AcknowledgeCurrentApplyForTesting();
+            W->SetDataRevisionForTesting(9007199254740991LL);
+            ProgressAtWrap = S->StreamProgressCount; Stage = 1;
+        }
+        if (Stage == 1 && S->StreamProgressCount > ProgressAtWrap && W->GetInFlightRevisionForTesting() == 1)
+        {
+            Test->TestFalse(TEXT("Revision wrap forces a full payload"), W->WasLastSubmitDeltaForTesting());
+            W->AcknowledgeCurrentApplyForTesting();
+            ProgressAtWrap = S->StreamProgressCount; Stage = 2;
+        }
+        if (Stage == 2 && S->StreamProgressCount > ProgressAtWrap && W->IsApplyInFlightForTesting())
+        {
+            Test->TestTrue(TEXT("Delta resumes after exact ACK of wrapped full revision"), W->WasLastSubmitDeltaForTesting());
+            Test->TestTrue(TEXT("Revision wrap leaves runtime out of Error"), W->RuntimeState != EEChartsRuntimeState::Error);
+            W->StopDataTableStreaming(); W->ReleaseSlateResources(false); return true;
+        }
+        return false;
+    }
+};
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsStreamingRevisionWrapTest, "EChartsWidget.Streaming.RevisionWrap",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsStreamingRevisionWrapTest::RunTest(const FString& Parameters)
+{
+    ADD_LATENT_AUTOMATION_COMMAND(FEChartsStreamRevisionWrapCommand(this));
+    return true;
+}
+
 class FEChartsStreamMemoryCommand : public IAutomationLatentCommand
 {
     FAutomationTestBase* Test;
@@ -342,14 +451,15 @@ bool FEChartsStreamingRingBufferTest::RunTest(const FString& Parameters)
     Series.Type = EEChartsSeriesDataType::Numeric2D;
     Series.Numeric2D.Reserve(FEChartsPayloadBuilder::MaxPointCount * 2 + 1);
     for (int32 I = 0; I < FEChartsPayloadBuilder::MaxPointCount; ++I) Series.Numeric2D.Add({double(I), double(I)});
+    Series.ConfigureRing(FEChartsPayloadBuilder::MaxPointCount);
     for (int32 I = 0; I < FEChartsPayloadBuilder::MaxPointCount; ++I)
     {
-        Series.Numeric2D.Add({double(I + FEChartsPayloadBuilder::MaxPointCount), double(I)});
-        Series.TrimFront(1);
+        Series.AddNumericRing({double(I + FEChartsPayloadBuilder::MaxPointCount), double(I)});
     }
     TestEqual(TEXT("Logical 100k window stays exact"), Series.Num(), FEChartsPayloadBuilder::MaxPointCount);
     TestTrue(TEXT("Physical cache is bounded by two logical windows"), Series.PhysicalNum() <= FEChartsPayloadBuilder::MaxPointCount * 2);
-    TestEqual(TEXT("Logical head hides the stale prefix"), Series.Numeric2D[Series.LogicalStart].X,
+    TestEqual(TEXT("Steady-state ring never moves a large stale prefix"), Series.FrontMoveCountForTesting, int64(0));
+    TestEqual(TEXT("Logical head hides the stale prefix"), Series.NumericAt(0).X,
         double(FEChartsPayloadBuilder::MaxPointCount));
     FEChartsSeriesData Delta; Delta.Type = EEChartsSeriesDataType::Numeric2D; Delta.Numeric2D.Add({200000.0, 1.0});
     FString Base64, Error;

@@ -159,9 +159,9 @@ namespace
 			case EEChartsSeriesDataType::Unset:
 				break;
 			case EEChartsSeriesDataType::Numeric2D:
-				for (int32 Index = Item.LogicalStart; Index < Item.Numeric2D.Num(); ++Index)
+				for (int32 Index = 0; Index < Item.Num(); ++Index)
 				{
-					const FEChartsDataPoint2D& Point = Item.Numeric2D[Index];
+					const FEChartsDataPoint2D& Point = Item.NumericAt(Index);
 					if (!TryAddBytes(4, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
@@ -172,9 +172,9 @@ namespace
 				}
 				break;
 			case EEChartsSeriesDataType::Category:
-				for (int32 Index = Item.LogicalStart; Index < Item.Category.Num(); ++Index)
+				for (int32 Index = 0; Index < Item.Num(); ++Index)
 				{
-					const FEChartsCategoryDataPoint& Point = Item.Category[Index];
+					const FEChartsCategoryDataPoint& Point = Item.CategoryAt(Index);
 					if (!TryAccumulateJsonStringBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAddBytes(6, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
@@ -185,9 +185,9 @@ namespace
 				}
 				break;
 			case EEChartsSeriesDataType::Data3D:
-				for (int32 Index = Item.LogicalStart; Index < Item.Data3D.Num(); ++Index)
+				for (int32 Index = 0; Index < Item.Num(); ++Index)
 				{
-					const FEChartsDataPoint3D& Point = Item.Data3D[Index];
+					const FEChartsDataPoint3D& Point = Item.Data3DAt(Index);
 					if (!TryAddBytes(7, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.X, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 						!TryAccumulateFiniteDoubleBytes(Point.Y, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
@@ -264,16 +264,16 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 		case EEChartsSeriesDataType::Unset:
 			break;
 		case EEChartsSeriesDataType::Numeric2D:
-			for (int32 Index = Item.LogicalStart; Index < Item.Numeric2D.Num(); ++Index)
+			for (int32 Index = 0; Index < Item.Num(); ++Index)
 			{
-				const FEChartsDataPoint2D& Point = Item.Numeric2D[Index];
+				const FEChartsDataPoint2D& Point = Item.NumericAt(Index);
 				Data.Add(NumberArray({Point.X, Point.Y}));
 			}
 			break;
 		case EEChartsSeriesDataType::Category:
-			for (int32 Index = Item.LogicalStart; Index < Item.Category.Num(); ++Index)
+			for (int32 Index = 0; Index < Item.Num(); ++Index)
 			{
-				const FEChartsCategoryDataPoint& Point = Item.Category[Index];
+				const FEChartsCategoryDataPoint& Point = Item.CategoryAt(Index);
 				TArray<TSharedPtr<FJsonValue>> Pair;
 				Pair.Reserve(2);
 				Pair.Add(MakeShared<FJsonValueString>(Point.X));
@@ -282,9 +282,9 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 			}
 			break;
 		case EEChartsSeriesDataType::Data3D:
-			for (int32 Index = Item.LogicalStart; Index < Item.Data3D.Num(); ++Index)
+			for (int32 Index = 0; Index < Item.Num(); ++Index)
 			{
-				const FEChartsDataPoint3D& Point = Item.Data3D[Index];
+				const FEChartsDataPoint3D& Point = Item.Data3DAt(Index);
 				Data.Add(NumberArray({Point.X, Point.Y, Point.Z, Point.ColorValue, Point.SymbolSizeValue}));
 			}
 			break;
@@ -383,16 +383,16 @@ bool FEChartsPayloadBuilder::BuildStreamDeltaBase64(
 	switch (Delta.Type)
 	{
 	case EEChartsSeriesDataType::Numeric2D:
-		for (int32 Index = Delta.LogicalStart; Index < Delta.Numeric2D.Num(); ++Index)
+		for (int32 Index = 0; Index < Delta.Num(); ++Index)
 		{
-			const auto& Point = Delta.Numeric2D[Index];
+			const auto& Point = Delta.NumericAt(Index);
 			Data.Add(NumberArray({Point.X, Point.Y}));
 		}
 		break;
 	case EEChartsSeriesDataType::Category:
-		for (int32 Index = Delta.LogicalStart; Index < Delta.Category.Num(); ++Index)
+		for (int32 Index = 0; Index < Delta.Num(); ++Index)
 		{
-			const auto& Point = Delta.Category[Index];
+			const auto& Point = Delta.CategoryAt(Index);
 			TArray<TSharedPtr<FJsonValue>> Pair;
 			Pair.Add(MakeShared<FJsonValueString>(Point.X));
 			Pair.Add(MakeShared<FJsonValueNumber>(Point.Y));
@@ -400,9 +400,9 @@ bool FEChartsPayloadBuilder::BuildStreamDeltaBase64(
 		}
 		break;
 	case EEChartsSeriesDataType::Data3D:
-		for (int32 Index = Delta.LogicalStart; Index < Delta.Data3D.Num(); ++Index)
+		for (int32 Index = 0; Index < Delta.Num(); ++Index)
 		{
-			const auto& Point = Delta.Data3D[Index];
+			const auto& Point = Delta.Data3DAt(Index);
 			Data.Add(NumberArray({Point.X, Point.Y, Point.Z, Point.ColorValue, Point.SymbolSizeValue}));
 		}
 		break;

@@ -124,6 +124,7 @@ void UEChartsWidget::MarkDataChanged()
 	{
 		DataRevision = 1;
 		LastAppliedRevision = 0;
+		if (IsStreamingActive()) InvalidateStreamDelta();
 	}
 	else
 	{
@@ -152,7 +153,7 @@ bool UEChartsWidget::AddDataPoint(const int32 SeriesIndex, const double X, const
 		return false;
 	}
 	Series.Type = EEChartsSeriesDataType::Numeric2D;
-	Series.Numeric2D.Add({X, Y});
+	Series.AddNumericRing({X, Y});
 	MarkDataChanged();
 	return true;
 }
@@ -174,7 +175,7 @@ bool UEChartsWidget::AddCategoryDataPoint(const int32 SeriesIndex, const FString
 		return false;
 	}
 	Series.Type = EEChartsSeriesDataType::Category;
-	Series.Category.Add({X, Y});
+	Series.AddCategoryRing({X, Y});
 	MarkDataChanged();
 	return true;
 }
@@ -219,7 +220,7 @@ bool UEChartsWidget::AppendSeriesData(const int32 SeriesIndex, const TArray<FECh
 	if (!Data.IsEmpty())
 	{
 		SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Numeric2D;
-		SeriesData[SeriesIndex].Numeric2D.Append(Data);
+		for (const FEChartsDataPoint2D& Point : Data) SeriesData[SeriesIndex].AddNumericRing(Point);
 		MarkDataChanged();
 	}
 	return true;
@@ -229,7 +230,9 @@ TArray<FEChartsDataPoint2D> UEChartsWidget::GetSeriesData(const int32 SeriesInde
 {
 	if (!IsValidSeriesIndex(SeriesIndex) || SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Numeric2D) return {};
 	const FEChartsSeriesData& Series = SeriesData[SeriesIndex];
-	return TArray<FEChartsDataPoint2D>(Series.Numeric2D.GetData() + Series.LogicalStart, Series.Num());
+	TArray<FEChartsDataPoint2D> Result; Result.Reserve(Series.Num());
+	for (int32 I = 0; I < Series.Num(); ++I) Result.Add(Series.NumericAt(I));
+	return Result;
 }
 
 bool UEChartsWidget::SetCategorySeriesData(const int32 SeriesIndex, const TArray<FEChartsCategoryDataPoint>& Data)
@@ -272,7 +275,7 @@ bool UEChartsWidget::AppendCategorySeriesData(const int32 SeriesIndex, const TAr
 	if (!Data.IsEmpty())
 	{
 		SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Category;
-		SeriesData[SeriesIndex].Category.Append(Data);
+		for (const FEChartsCategoryDataPoint& Point : Data) SeriesData[SeriesIndex].AddCategoryRing(Point);
 		MarkDataChanged();
 	}
 	return true;
@@ -282,7 +285,9 @@ TArray<FEChartsCategoryDataPoint> UEChartsWidget::GetCategorySeriesData(const in
 {
 	if (!IsValidSeriesIndex(SeriesIndex) || SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Category) return {};
 	const FEChartsSeriesData& Series = SeriesData[SeriesIndex];
-	return TArray<FEChartsCategoryDataPoint>(Series.Category.GetData() + Series.LogicalStart, Series.Num());
+	TArray<FEChartsCategoryDataPoint> Result; Result.Reserve(Series.Num());
+	for (int32 I = 0; I < Series.Num(); ++I) Result.Add(Series.CategoryAt(I));
+	return Result;
 }
 
 bool UEChartsWidget::Set3DData(const int32 SeriesIndex, const TArray<FEChartsDataPoint3D>& Data)
@@ -327,7 +332,7 @@ bool UEChartsWidget::Append3DData(const int32 SeriesIndex, const TArray<FECharts
 	if (!Data.IsEmpty())
 	{
 		SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Data3D;
-		SeriesData[SeriesIndex].Data3D.Append(Data);
+		for (const FEChartsDataPoint3D& Point : Data) SeriesData[SeriesIndex].AddData3DRing(Point);
 		MarkDataChanged();
 	}
 	return true;
@@ -337,7 +342,9 @@ TArray<FEChartsDataPoint3D> UEChartsWidget::Get3DData(const int32 SeriesIndex) c
 {
 	if (!IsValidSeriesIndex(SeriesIndex) || SeriesData[SeriesIndex].Type != EEChartsSeriesDataType::Data3D) return {};
 	const FEChartsSeriesData& Series = SeriesData[SeriesIndex];
-	return TArray<FEChartsDataPoint3D>(Series.Data3D.GetData() + Series.LogicalStart, Series.Num());
+	TArray<FEChartsDataPoint3D> Result; Result.Reserve(Series.Num());
+	for (int32 I = 0; I < Series.Num(); ++I) Result.Add(Series.Data3DAt(I));
+	return Result;
 }
 
 bool UEChartsWidget::ClearSeries(const int32 SeriesIndex)

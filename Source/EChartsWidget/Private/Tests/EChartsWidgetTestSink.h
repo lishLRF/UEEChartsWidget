@@ -20,7 +20,7 @@ public:
 		++StreamProgressCount;
 		if (StreamProgressFrame == GFrameCounter) ++StreamSameFrameCount;
 		StreamProgressFrame = GFrameCounter;
-		if (StreamCallbackWidget.IsValid())
+		if (StreamCallbackWidget.IsValid() && StreamProgressCount >= StreamCallbackAfterProgressCount)
 		{
 			UEChartsWidget* W = StreamCallbackWidget.Get();
 			if (StreamCallbackAction == 1) W->PauseDataTableStreaming();
@@ -31,6 +31,7 @@ public:
 	}
 	int32 StreamStartedCount = 0, StreamStoppedCount = 0, StreamCompletedCount = 0, StreamLoopedCount = 0;
 	int32 StreamProgressCount = 0, StreamSameFrameCount = 0, StreamCallbackAction = 0, StreamRestartsRemaining = 0;
+	int32 StreamCallbackAfterProgressCount = 0;
 	uint64 StreamProgressFrame = MAX_uint64;
 	TWeakObjectPtr<UEChartsWidget> StreamCallbackWidget;
 	UFUNCTION()

@@ -19,12 +19,16 @@ void UEChartsWidget::SetTimeSeriesWindow(int32 MaxVisiblePoints)
 {
 	if (!IsInGameThread()) return;
 	TimeSeriesWindow = FMath::Clamp(MaxVisiblePoints, 1, FEChartsPayloadBuilder::MaxPointCount);
-	if (IsStreamingActive() && SeriesData[0].Num() > TimeSeriesWindow)
+	if (IsStreamingActive())
 	{
-		TrimStreamWindow();
-		MarkDataChanged();
-		if (StreamFinalRevision) StreamFinalRevision = DataRevision;
-		ApplyEChartsChanges();
+		const bool bDropsPoints = SeriesData[0].Num() > TimeSeriesWindow;
+		SeriesData[0].ConfigureRing(TimeSeriesWindow);
+		if (bDropsPoints)
+		{
+			MarkDataChanged();
+			if (StreamFinalRevision) StreamFinalRevision = DataRevision;
+			ApplyEChartsChanges();
+		}
 	}
 }
 
@@ -52,18 +56,20 @@ bool UEChartsWidget::StartDataTableStreaming(float IntervalSeconds, int32 RowsPe
 	bStreamLoop = Loop;
 	bStreamProductionComplete = false;
 	StreamSourceJsonBytes = 1024;
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+	StreamCategorySortKeyCopyCountForTesting = 0;
+#endif
 	CurrentRow = 0; LoopCount = 0; StreamedRows = 0;
+	if (MappedDataTable && MappedDataTable->GetRowMap().Num() > FEChartsPayloadBuilder::MaxPointCount)
+	{
+		StreamState = EEChartsDataTableStreamState::Error;
+		ReportDataError(FString::Printf(TEXT("DataTable stream source exceeds the %d row limit."), FEChartsPayloadBuilder::MaxPointCount));
+		return false;
+	}
 	LoadDataTable(PreparationRowsPerFrame);
 	if (DataTableLoadState != EEChartsDataTableLoadState::Reading)
 	{
 		StreamState = EEChartsDataTableStreamState::Error;
-		return false;
-	}
-	if (TotalRows > FEChartsPayloadBuilder::MaxPointCount)
-	{
-		StopDataTableLoad(false);
-		StreamState = EEChartsDataTableStreamState::Error;
-		ReportDataError(FString::Printf(TEXT("DataTable stream source exceeds the %d row limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
 	}
 	// The preparation shares the snapshot reader, but never owns a cache rollback or a bulk Apply.
@@ -155,6 +161,7 @@ void UEChartsWidget::StartPreparedStream(const uint64 Request)
 	}
 	bPreserveStreamCategoryOrder = PreparedStreamRows.Type == EEChartsSeriesDataType::Category;
 	XAxisMode = bPreserveStreamCategoryOrder ? EEChartsXAxisMode::Category : EEChartsXAxisMode::ShowAll;
+	SeriesData[0].ConfigureRing(TimeSeriesWindow);
 	StreamState = EEChartsDataTableStreamState::Playing;
 	TrimStreamWindow();
 	const uint64 ActiveStreamRequest = StreamRequest;
@@ -173,7 +180,8 @@ void UEChartsWidget::CancelStreamTicker()
 
 void UEChartsWidget::ScheduleStreamTicker()
 {
-	if (bStreamingSuspended || StreamState != EEChartsDataTableStreamState::Playing || StreamFinalRevision || StreamTickerHandle.IsValid()) return;
+	if (bStreamingSuspended || StreamState != EEChartsDataTableStreamState::Playing || StreamFinalRevision ||
+		StreamTickerHandle.IsValid() || (InFlightRevision != 0 && PendingStreamDeltas.Num() >= 2)) return;
 	const uint64 Request = StreamRequest;
 	StreamTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateWeakLambda(this, [this, Request](float) { return StreamStep(Request); }), StreamInterval);
@@ -186,26 +194,39 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 	if (LastStreamTickFrameForTesting == GFrameCounter) ++SameFrameStreamTickCallsForTesting;
 	LastStreamTickFrameForTesting = GFrameCounter;
 #endif
-	if (Request != StreamRequest || StreamState != EEChartsDataTableStreamState::Playing || bStreamingSuspended) return false;
-	if (LastStreamFrame == GFrameCounter || LastDataTableReadFrame == GFrameCounter) return true;
+	bInStreamStep = true;
+	auto Finish = [this](const bool bKeepCurrentTicker)
+	{
+		const bool bDeferredResume = bResumeStreamAfterStep;
+		bResumeStreamAfterStep = false;
+		bInStreamStep = false;
+		if (bDeferredResume)
+		{
+			ScheduleStreamTicker();
+			return false;
+		}
+		return bKeepCurrentTicker;
+	};
+	if (Request != StreamRequest || StreamState != EEChartsDataTableStreamState::Playing || bStreamingSuspended) return Finish(false);
+	if (LastStreamFrame == GFrameCounter || LastDataTableReadFrame == GFrameCounter) return Finish(true);
 	LastStreamFrame = GFrameCounter;
-	if (CurrentTemplate != DataTableRequestTemplate) { FailStreaming(TEXT("Template changed during streaming.")); return false; }
+	if (CurrentTemplate != DataTableRequestTemplate) { FailStreaming(TEXT("Template changed during streaming.")); return Finish(false); }
 	bool bCategory = false; FString Error;
-	if (!EChartsDataTableLoader::Validate(MappedDataTable, DataTableMapping, CurrentTemplate, bCategory, Error)) { FailStreaming(Error); return false; }
+	if (!EChartsDataTableLoader::Validate(MappedDataTable, DataTableMapping, CurrentTemplate, bCategory, Error)) { FailStreaming(Error); return Finish(false); }
 	if (CurrentRow >= PreparedStreamRows.Num())
 	{
-		if (!bStreamProductionComplete) return true;
+		if (!bStreamProductionComplete) return Finish(true);
 		if (bStreamLoop)
 		{
 			CurrentRow = 0;
 			++LoopCount;
 			OnDataTableStreamLooped.Broadcast(LoopCount);
-			return Request == StreamRequest && StreamState == EEChartsDataTableStreamState::Playing && !bStreamingSuspended;
+			return Finish(Request == StreamRequest && StreamState == EEChartsDataTableStreamState::Playing && !bStreamingSuspended);
 		}
 		StreamFinalRevision = DataRevision;
 		StreamTickerHandle.Reset();
 		CompleteStreamIfAcknowledged(LastAppliedRevision);
-		return false;
+		return Finish(false);
 	}
 	FEChartsSeriesData& Target = SeriesData[0];
 	Target.Type = PreparedStreamRows.Type;
@@ -215,21 +236,21 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 	const int32 Added = End - CurrentRow;
 	const int32 DropCount = FMath::Max(0, Target.Num() + Added - TimeSeriesWindow);
 	const int32 Capacity = FMath::Min(TimeSeriesWindow, Target.Num() + Added);
-	if (!CanReplacePointCount(0, Capacity)) { FailStreaming(TEXT("Stream exceeds the chart point limit across all series.")); return false; }
+	if (!CanReplacePointCount(0, Capacity)) { FailStreaming(TEXT("Stream exceeds the chart point limit across all series.")); return Finish(false); }
 	for (; CurrentRow < End; ++CurrentRow)
 	{
 		switch (Target.Type)
 		{
 		case EEChartsSeriesDataType::Numeric2D:
-			Target.Numeric2D.Add(PreparedStreamRows.Numeric2D[CurrentRow]);
+			Target.AddNumericRing(PreparedStreamRows.Numeric2D[CurrentRow]);
 			AddedRows.Numeric2D.Add(PreparedStreamRows.Numeric2D[CurrentRow]);
 			break;
 		case EEChartsSeriesDataType::Category:
-			Target.Category.Add(PreparedStreamRows.Category[CurrentRow]);
+			Target.AddCategoryRing(PreparedStreamRows.Category[CurrentRow]);
 			AddedRows.Category.Add(PreparedStreamRows.Category[CurrentRow]);
 			break;
 		case EEChartsSeriesDataType::Data3D:
-			Target.Data3D.Add(PreparedStreamRows.Data3D[CurrentRow]);
+			Target.AddData3DRing(PreparedStreamRows.Data3D[CurrentRow]);
 			AddedRows.Data3D.Add(PreparedStreamRows.Data3D[CurrentRow]);
 			break;
 		default: break;
@@ -247,9 +268,9 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 		StreamTickerHandle.Reset();
 	}
 	ApplyEChartsChanges();
-	if (Request != StreamRequest || !IsStreamingActive()) return false;
+	if (Request != StreamRequest || !IsStreamingActive()) return Finish(false);
 	OnDataTableStreamProgress.Broadcast(CurrentRow, PreparedStreamRows.Num(), LoopCount);
-	if (Request != StreamRequest || !IsStreamingActive()) return false;
+	if (Request != StreamRequest || !IsStreamingActive()) return Finish(false);
 	if (bAtEnd && bStreamLoop)
 	{
 		CurrentRow = 0;
@@ -258,8 +279,8 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 	}
 	const bool bBackpressuredByBrowser = InFlightRevision != 0 && PendingStreamDeltas.Num() >= 2;
 	if (bBackpressuredByBrowser) StreamTickerHandle.Reset();
-	return Request == StreamRequest && StreamState == EEChartsDataTableStreamState::Playing && !StreamFinalRevision &&
-		!bStreamingSuspended && !bBackpressuredByBrowser;
+	return Finish(Request == StreamRequest && StreamState == EEChartsDataTableStreamState::Playing && !StreamFinalRevision &&
+		!bStreamingSuspended && !bBackpressuredByBrowser);
 }
 
 void UEChartsWidget::PauseDataTableStreaming()
@@ -273,6 +294,11 @@ void UEChartsWidget::ResumeDataTableStreaming()
 {
 	if (!IsInGameThread() || StreamState != EEChartsDataTableStreamState::Paused) return;
 	StreamState = EEChartsDataTableStreamState::Playing;
+	if (bInStreamStep)
+	{
+		bResumeStreamAfterStep = true;
+		return;
+	}
 	ScheduleStreamTicker();
 }
 
@@ -281,12 +307,13 @@ void UEChartsWidget::StopStreaming(bool bNotify)
 	const bool bActive = IsStreamingActive();
 	const bool bPreparing = StreamState == EEChartsDataTableStreamState::Preparing;
 	++StreamRequest;
+	bResumeStreamAfterStep = false;
 	CancelStreamTicker();
 	StreamState = EEChartsDataTableStreamState::Stopped;
 	StreamFinalRevision = 0;
 	bStreamProductionComplete = false;
 	PreparedStreamRows = {};
-	SeriesData[0].Compact();
+	SeriesData[0].Linearize();
 	InvalidateStreamDelta();
 	if (bPreparing || (DataTableSnapshot && DataTableSnapshot->bStreaming)) StopDataTableLoad(false);
 	if (bActive && bNotify) OnDataTableStreamingStopped.Broadcast();

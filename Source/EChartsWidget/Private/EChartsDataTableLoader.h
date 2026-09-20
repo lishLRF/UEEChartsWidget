@@ -32,8 +32,8 @@ namespace EChartsDataTableLoader
 bool Columns(UDataTable* Table, TArray<FEChartsDataTableColumn>& Out, FString& Error);
 bool Validate(UDataTable* Table, const FEChartsDataTableMapping& Mapping, EEChartsTemplate Template, bool& bCategory,
               FString& Error);
-void ReadSortKey(UDataTable* Table, FName RowName, const FEChartsDataTableSnapshot& Snapshot,
-	FEChartsDataTableRow& Out);
+bool ReadSortKey(UDataTable* Table, FName RowName, const FEChartsDataTableSnapshot& Snapshot,
+	int64& InOutEstimatedJsonBytes, FEChartsDataTableRow& Out, FString& Error);
 bool ReadRow(UDataTable* Table, FName RowName, const FEChartsDataTableSnapshot& Snapshot, FEChartsDataTableRow& Out);
 TArray<FName> SortRowNames(TArray<FEChartsDataTableRow> Rows, bool bCategory, EEChartsDataTableOrder Order);
 FEChartsSeriesData Convert(TArray<FEChartsDataTableRow> Rows, bool bCategory, bool b3D, EEChartsDataTableOrder Order);

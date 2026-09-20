@@ -248,8 +248,12 @@ public:
 	int32 GetLastSubmitCommandLengthForTesting() const { return LastSubmitCommandLengthForTesting; }
 	bool WasLastSubmitDeltaForTesting() const { return bLastSubmitWasDeltaForTesting; }
 	int64 GetInFlightRevisionForTesting() const { return InFlightRevision; }
+	int32 GetDataTableSnapshotCreationCountForTesting() const { return DataTableSnapshotCreationCountForTesting; }
+	int32 GetStreamCategorySortKeyCopyCountForTesting() const { return StreamCategorySortKeyCopyCountForTesting; }
+	int32 GetPendingStreamDeltaCountForTesting() const { return PendingStreamDeltas.Num(); }
 	void AcknowledgeCurrentApplyForTesting();
 	void AcknowledgeRevisionForTesting(int64 Revision);
+	void SetDataRevisionForTesting(int64 Revision) { DataRevision = Revision; }
 	uint32 GetNumericStreamAllocatedBytesForTesting() const { return SeriesData[0].Numeric2D.GetAllocatedSize(); }
 #endif
 
@@ -299,6 +303,8 @@ private:
 	bool bStreamLoop = false;
 	bool bStreamingSuspended = false;
 	bool bStreamProductionComplete = false;
+	bool bInStreamStep = false;
+	bool bResumeStreamAfterStep = false;
 	bool bPreserveStreamCategoryOrder = false;
 	int64 StreamFinalRevision = 0;
 	int64 StreamSourceJsonBytes = 1024;
@@ -340,6 +346,8 @@ private:
 	uint64 LastStreamTickFrameForTesting = MAX_uint64;
 	int32 LastSubmitCommandLengthForTesting = 0;
 	bool bLastSubmitWasDeltaForTesting = false;
+	int32 DataTableSnapshotCreationCountForTesting = 0;
+	int32 StreamCategorySortKeyCopyCountForTesting = 0;
 	bool bReportSeriesCountForTesting = false;
 	FString InitializationPayloadForTesting = TEXT("{}");
 #endif

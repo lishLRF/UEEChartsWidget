@@ -1,4 +1,5 @@
 #include "EChartsDataTableLoader.h"
+#include "EChartsPayloadBuilder.h"
 #include "Algo/StableSort.h"
 #include "UObject/UnrealType.h"
 #include "UObject/TextProperty.h"
@@ -152,8 +153,9 @@ bool EChartsDataTableLoader::ReadRow(
 	Out.bValidSortKey = true;
 	return true;
 }
-void EChartsDataTableLoader::ReadSortKey(
-	UDataTable* Table, FName RowName, const FEChartsDataTableSnapshot& S, FEChartsDataTableRow& Out)
+bool EChartsDataTableLoader::ReadSortKey(
+	UDataTable* Table, FName RowName, const FEChartsDataTableSnapshot& S,
+	int64& InOutEstimatedJsonBytes, FEChartsDataTableRow& Out, FString& Error)
 {
 	check(IsInGameThread());
 	Out.RowKey = RowName;
@@ -162,20 +164,44 @@ void EChartsDataTableLoader::ReadSortKey(
 		Out.RowName = RowName.GetPlainNameString();
 		Out.RowNameNumber = RowName.GetNumber();
 		Out.bValidSortKey = true;
-		return;
+		return true;
 	}
 	const uint8* const* Found = Table->GetRowMap().Find(RowName);
-	if (!Found || !*Found) return;
+	if (!Found || !*Found) return true;
 	const FProperty* X = FindFProperty<FProperty>(Table->GetRowStruct(), S.Mapping.X);
 	if (S.bCategory)
 	{
-		Out.Category = Category(X, *Found);
+		if (const FStrProperty* StringProperty = CastField<FStrProperty>(X))
+		{
+			const FString* Value = StringProperty->ContainerPtrToValuePtr<FString>(*Found);
+			if (!Value || !FEChartsPayloadBuilder::AccumulateJsonStringBytes(
+				*Value, FEChartsPayloadBuilder::MaxJsonBytes, InOutEstimatedJsonBytes))
+			{
+				Error = FString::Printf(TEXT("DataTable stream sort keys exceed the %d byte JSON safety limit."),
+					FEChartsPayloadBuilder::MaxJsonBytes);
+				return false;
+			}
+			Out.Category = *Value;
+		}
+		else
+		{
+			FString Value = Category(X, *Found);
+			if (!FEChartsPayloadBuilder::AccumulateJsonStringBytes(
+				Value, FEChartsPayloadBuilder::MaxJsonBytes, InOutEstimatedJsonBytes))
+			{
+				Error = FString::Printf(TEXT("DataTable stream sort keys exceed the %d byte JSON safety limit."),
+					FEChartsPayloadBuilder::MaxJsonBytes);
+				return false;
+			}
+			Out.Category = MoveTemp(Value);
+		}
 		Out.bValidSortKey = !Out.Category.TrimStartAndEnd().IsEmpty();
 	}
 	else
 	{
 		Out.bValidSortKey = Numeric(X, *Found, Out.Point.X);
 	}
+	return true;
 }
 TArray<FName> EChartsDataTableLoader::SortRowNames(
 	TArray<FEChartsDataTableRow> Rows, const bool bCategory, const EEChartsDataTableOrder Order)
