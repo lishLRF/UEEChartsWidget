@@ -302,6 +302,13 @@
         }
       },
       applyOptionBase64: function (requestId, base64) {
+        let chartSnapshot = null;
+        let optionSnapshot = null;
+        let templateSnapshot = null;
+        let payloadSnapshot = null;
+        let effectiveTemplateSnapshot = null;
+        let interactionModeSnapshot = null;
+        let chartMutationAttempted = false;
         try {
           if (!validRequestId(requestId)) throw new Error('Invalid option request id');
           const optionValue = JSON.parse(decodeBase64Text(base64, 16 * 1024 * 1024, 'option payload'));
@@ -309,6 +316,13 @@
             throw new Error('ECharts option JSON must be an object');
           }
           const option = window.UEEChartsTemplates.applyInteractionMode(optionValue, currentInteractionMode);
+          chartSnapshot = clone(chart.getOption());
+          optionSnapshot = clone(currentOption);
+          templateSnapshot = clone(templateBaseOption);
+          payloadSnapshot = clone(currentPayload);
+          effectiveTemplateSnapshot = currentEffectiveTemplate;
+          interactionModeSnapshot = currentInteractionMode;
+          chartMutationAttempted = true;
           chart.setOption(option, { notMerge: true, lazyUpdate: false });
           currentEffectiveTemplate = 'CustomOption';
           templateBaseOption = clone(option);
@@ -317,7 +331,30 @@
           emitResult('OPTION_RESULT', requestId, true, 'CustomOption applied');
           return true;
         } catch (error) {
-          const detail = error && error.message ? error.message : String(error);
+          let detail = error && error.message ? error.message : String(error);
+          if (chartMutationAttempted) {
+            try {
+              chart.clear();
+              chart.setOption(chartSnapshot, { notMerge: true, lazyUpdate: false });
+              // ECharts can leave its main-process guard wedged after a throwing setOption.
+              // Recreate the instance so the restored snapshot is backed by a healthy model.
+              chart.dispose();
+              chart = window.echarts.init(chartElement, null, { renderer: 'canvas' });
+              chart.setOption(chartSnapshot, { notMerge: true, lazyUpdate: false });
+              currentOption = optionSnapshot;
+              templateBaseOption = templateSnapshot;
+              currentPayload = payloadSnapshot;
+              currentEffectiveTemplate = effectiveTemplateSnapshot;
+              currentInteractionMode = interactionModeSnapshot;
+              detail += '; previous chart restored';
+            } catch (rollbackError) {
+              const rollbackDetail = rollbackError && rollbackError.message ? rollbackError.message : String(rollbackError);
+              detail += '; rollback failed: ' + rollbackDetail;
+              emitResult('OPTION_RESULT', requestId, false, detail);
+              emit('ERROR', 'option rollback failed: ' + rollbackDetail.replace(/[\r\n]+/g, ' | '));
+              return false;
+            }
+          }
           emitResult('OPTION_RESULT', requestId, false, detail);
           return false;
         }

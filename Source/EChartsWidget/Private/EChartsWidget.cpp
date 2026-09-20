@@ -572,23 +572,50 @@ uint64 UEChartsWidget::AllocateAdvancedRequestId()
 	return ++NextAdvancedRequestId;
 }
 
-void UEChartsWidget::ClearPendingAdvancedRequests()
+void UEChartsWidget::ClearPendingAdvancedRequests(const bool bPreserveOptionCandidate)
 {
+	if (bPreserveOptionCandidate && PendingOptionBase64.IsEmpty() &&
+		bInFlightOptionIsCandidate && !InFlightOptionBase64.IsEmpty())
+	{
+		PendingOptionBase64 = InFlightOptionBase64;
+	}
+	else if (!bPreserveOptionCandidate)
+	{
+		PendingOptionBase64.Reset();
+	}
+	InFlightOptionBase64.Reset();
+	bInFlightOptionIsCandidate = false;
 	PendingOptionRequestId = 0;
 	PendingInteractionRequestId = 0;
 	PendingJavaScriptRequests.Reset();
 }
 
-void UEChartsWidget::SendCachedOption()
+void UEChartsWidget::SendOptionBase64(const FString& OptionBase64, const bool bCandidate)
 {
-	if (RuntimeState != EEChartsRuntimeState::Ready || CurrentTemplate != EEChartsTemplate::CustomOption ||
-		CachedOptionBase64.IsEmpty())
+	if (RuntimeState != EEChartsRuntimeState::Ready || PendingOptionRequestId != 0 || OptionBase64.IsEmpty())
 	{
 		return;
 	}
 	PendingOptionRequestId = AllocateAdvancedRequestId();
-	bOptionReplayPending = true;
-	ExecuteJavascript(FEChartsWidgetJavascript::BuildApplyOptionCommand(PendingOptionRequestId, CachedOptionBase64));
+	InFlightOptionBase64 = OptionBase64;
+	bInFlightOptionIsCandidate = bCandidate;
+	ExecuteJavascript(FEChartsWidgetJavascript::BuildApplyOptionCommand(PendingOptionRequestId, InFlightOptionBase64));
+}
+
+void UEChartsWidget::SendPendingOrCachedOption()
+{
+	if (RuntimeState != EEChartsRuntimeState::Ready || PendingOptionRequestId != 0) return;
+	if (!PendingOptionBase64.IsEmpty())
+	{
+		const FString Candidate = MoveTemp(PendingOptionBase64);
+		PendingOptionBase64.Reset();
+		SendOptionBase64(Candidate, true);
+		return;
+	}
+	if (bOptionReplayPending && CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty())
+	{
+		SendOptionBase64(CachedOptionBase64, false);
+	}
 }
 
 void UEChartsWidget::SendInteractionMode()
@@ -633,12 +660,10 @@ bool UEChartsWidget::SetEChartsOptionJSON(const FString& OptionJson)
 	InvalidateStreamDelta();
 	CancelAutoApply();
 	bApplyRequested = false;
-	CurrentTemplate = EEChartsTemplate::CustomOption;
-	CachedOptionBase64 = Encoded;
-	bOptionReplayPending = true;
+	PendingOptionBase64 = Encoded;
 	if (RuntimeState == EEChartsRuntimeState::Ready)
 	{
-		SendCachedOption();
+		SendPendingOrCachedOption();
 	}
 	return true;
 }
@@ -690,7 +715,7 @@ void UEChartsWidget::InitializeECharts(
 void UEChartsWidget::BeginLoadGeneration()
 {
 	CancelAutoApply();
-	ClearPendingAdvancedRequests();
+	ClearPendingAdvancedRequests(true);
 	bInteractionReplayPending = true;
 	bOptionReplayPending = CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (IsStreamingActive()) InvalidateStreamDelta();
@@ -742,7 +767,7 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 	}
 	else StopDataTableLoad(false);
 	CancelAutoApply();
-	ClearPendingAdvancedRequests();
+	ClearPendingAdvancedRequests(false);
 	bInteractionReplayPending = bHasInitialized;
 	bOptionReplayPending = bHasInitialized && CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (InFlightRevision != 0)
@@ -766,7 +791,7 @@ void UEChartsWidget::BeginDestroy()
 	StopStreaming(false);
 	StopDataTableLoad(false);
 	CancelAutoApply();
-	ClearPendingAdvancedRequests();
+	ClearPendingAdvancedRequests(false);
 	OnConsoleMessage.RemoveDynamic(this, &UEChartsWidget::HandleEChartsConsoleMessage);
 	Super::BeginDestroy();
 }
@@ -811,7 +836,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				CurrentTemplate,
 				InteractionMode,
 				PayloadJson));
-			if (bOptionReplayPending) SendCachedOption();
+			SendPendingOrCachedOption();
 			if (bInteractionReplayPending) SendInteractionMode();
 			OnChartReady.Broadcast();
 			if (bApplyRequested)
@@ -907,14 +932,24 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		if (TryParseAdvancedResult(Message.RightChop(OptionResultMarker.Len()), MessageGeneration, RequestId, bSuccess, Detail) &&
 			MessageGeneration == LoadGeneration && RequestId == PendingOptionRequestId && RuntimeState == EEChartsRuntimeState::Ready)
 		{
+			const bool bWasCandidate = bInFlightOptionIsCandidate;
+			const FString CompletedOptionBase64 = MoveTemp(InFlightOptionBase64);
 			PendingOptionRequestId = 0;
-			bOptionReplayPending = !bSuccess;
+			InFlightOptionBase64.Reset();
+			bInFlightOptionIsCandidate = false;
+			bOptionReplayPending = !bSuccess && !bWasCandidate;
 			if (bSuccess)
 			{
+				if (bWasCandidate)
+				{
+					CachedOptionBase64 = CompletedOptionBase64;
+					CurrentTemplate = EEChartsTemplate::CustomOption;
+				}
 				EffectiveTemplate = FEChartsWidgetJavascript::TemplateName(EEChartsTemplate::CustomOption);
 				CancelAutoApply();
 			}
 			OnOptionApplied.Broadcast(bSuccess, Detail);
+			if (!Detail.Contains(TEXT("rollback failed:"))) SendPendingOrCachedOption();
 		}
 		return;
 	}

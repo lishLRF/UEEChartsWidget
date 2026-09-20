@@ -283,6 +283,10 @@ public:
 	void SetDataRevisionForTesting(int64 Revision) { DataRevision = Revision; }
 	uint32 GetNumericStreamAllocatedBytesForTesting() const { return SeriesData[0].Numeric2D.GetAllocatedSize(); }
 	const FString& GetCachedOptionBase64ForTesting() const { return CachedOptionBase64; }
+	FString GetPendingOptionBase64ForTesting() const
+	{
+		return !PendingOptionBase64.IsEmpty() ? PendingOptionBase64 : (bInFlightOptionIsCandidate ? InFlightOptionBase64 : FString());
+	}
 	int32 GetPendingAdvancedRequestCountForTesting() const
 	{
 		return PendingJavaScriptRequests.Num() + (PendingOptionRequestId > 0 ? 1 : 0) + (PendingInteractionRequestId > 0 ? 1 : 0);
@@ -310,9 +314,10 @@ private:
 	void ScheduleAutoApply();
 	void CancelAutoApply();
 	uint64 AllocateAdvancedRequestId();
-	void SendCachedOption();
+	void SendOptionBase64(const FString& OptionBase64, bool bCandidate);
+	void SendPendingOrCachedOption();
 	void SendInteractionMode();
-	void ClearPendingAdvancedRequests();
+	void ClearPendingAdvancedRequests(bool bPreserveOptionCandidate);
 	int32 GetTotalPointCount() const;
 	void StopDataTableLoad(bool bNotify);
 	void FailDataTableLoad(const FString& Error);
@@ -376,11 +381,17 @@ private:
 	bool bApplyRequested = false;
 	double LastSubmitSeconds = 0.0;
 	FTSTicker::FDelegateHandle AutoApplyTickerHandle;
+	/** Last option acknowledged by the active ECharts host. */
 	FString CachedOptionBase64;
+	/** Latest validated option waiting to be sent; never treated as committed state. */
+	FString PendingOptionBase64;
+	/** Exact payload associated with PendingOptionRequestId. */
+	FString InFlightOptionBase64;
 	uint64 NextAdvancedRequestId = 0;
 	uint64 PendingOptionRequestId = 0;
 	uint64 PendingInteractionRequestId = 0;
 	TSet<uint64> PendingJavaScriptRequests;
+	bool bInFlightOptionIsCandidate = false;
 	bool bOptionReplayPending = false;
 	bool bInteractionReplayPending = false;
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR

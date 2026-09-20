@@ -173,6 +173,62 @@ test('custom option Base64 safely applies hostile JSON and reports recoverable s
   assert.equal(appliedOption.title.text, 'recovered');
 });
 
+test('custom option transaction restores the visible chart after setOption mutates then throws', () => {
+  const state = createHostContext();
+  let visibleOption = null;
+  const copy = value => JSON.parse(JSON.stringify(value));
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({
+    clear() { visibleOption = {}; }, resize() {}, dispose() {},
+    setOption(option) {
+      visibleOption = copy(option);
+      if (option.title && option.title.text === 'attacker-replacement') {
+        visibleOption.series = [];
+        throw new Error('xAxis "999" not found');
+      }
+    },
+    getOption() { return copy(visibleOption || {}); },
+  });
+  vm.runInContext(hostSource, state.context);
+  state.window.UEEChartsHost.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  const good = {
+    title: { text: 'known-good' }, tooltip: {}, xAxis: {}, yAxis: {},
+    series: [{ type: 'line', data: [3, 1, 4] }],
+  };
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(41, encodePayload(good)), true);
+  const before = state.window.UEEChartsHost.getOptionForTesting();
+  const bad = {
+    title: { text: 'attacker-replacement' }, xAxis: {}, yAxis: {},
+    series: [{ type: 'line', xAxisIndex: 999, data: [9] }],
+  };
+
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(42, encodePayload(bad)), false);
+  assert.deepEqual(state.window.UEEChartsHost.getOptionForTesting(), before);
+  assert.equal(state.window.UEEChartsHost.getOptionForTesting().series.length, 1);
+  assert.ok(state.logs.some(line => line.includes('__UE_ECHARTS_OPTION_RESULT__:7:42:0:')));
+});
+
+test('custom option reports a terminal host error when rollback itself fails', () => {
+  const state = createHostContext();
+  let rollbackMustFail = false;
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {}, getOption() { return { title: { text: 'known-good' }, series: [] }; },
+    setOption(option) {
+      if (rollbackMustFail) throw new Error('synthetic rollback failure');
+      if (option.title && option.title.text === 'attacker-replacement') {
+        rollbackMustFail = true;
+        throw new Error('synthetic apply failure');
+      }
+    },
+  });
+  vm.runInContext(hostSource, state.context);
+
+  assert.equal(state.window.UEEChartsHost.applyOptionBase64(43, encodePayload({ title: { text: 'attacker-replacement' } })), false);
+  assert.ok(state.logs.some(line => line.includes('__UE_ECHARTS_OPTION_RESULT__:7:43:0:') && line.includes('rollback failed')));
+  assert.ok(state.logs.some(line => line.startsWith('__UE_ECHARTS_ERROR__:7:option rollback failed:')));
+});
+
 test('custom option rejects arrays malformed UTF-8 and decoded payloads above 16 MiB', () => {
   const state = createHostContext();
   vm.runInContext(hostSource, state.context);

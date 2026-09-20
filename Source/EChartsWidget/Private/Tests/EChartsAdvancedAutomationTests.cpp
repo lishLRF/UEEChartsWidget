@@ -192,8 +192,8 @@ namespace EChartsAdvancedTests
 		{
 			State->ExpectedProbes = State->Sink->AdvancedProbeCount + 1;
 			State->Widget->ExecuteJavascript(FString::Printf(TEXT(
-				"(function(){var o=window.UEEChartsHost.getOptionForTesting();console.log('__UE_ECHARTS_TEST_ADVANCED__:%s:'+((%s)?'OK':'BAD'));}());"),
-				*Name, *Condition));
+				"(function(){var o=window.UEEChartsHost.getOptionForTesting();var ok=(%s);var t=o.title&&o.title[0]?o.title[0].text:'none';var n=o.series?o.series.length:-1;var d=n>0&&o.series[0].data?o.series[0].data.length:-1;console.log('__UE_ECHARTS_TEST_ADVANCED__:%s:'+(ok?'OK':('BAD:'+t+':'+n+':'+d)));}());"),
+				*Condition, *Name));
 		}
 
 		bool ProbeSucceeded(const FString& Name)
@@ -205,6 +205,136 @@ namespace EChartsAdvancedTests
 		}
 
 		TSharedRef<FAdvancedCEFState> State;
+		FAutomationTestBase* Test;
+	};
+
+	struct FOptionRollbackCEFState
+	{
+		UEChartsWidget* Widget = nullptr;
+		UEChartsWidgetTestSink* Sink = nullptr;
+		TSharedPtr<SWidget> SlateWidget;
+		double Deadline = 0.0;
+		int32 Stage = 0;
+		int32 ExpectedOptionResults = 0;
+		int32 ExpectedProbes = 0;
+		FString LastGoodBase64;
+
+		void Cleanup()
+		{
+			SlateWidget.Reset();
+			if (Widget) { DestroyWidget(Widget); Widget = nullptr; }
+			if (Sink) { Sink->RemoveFromRoot(); Sink = nullptr; }
+		}
+	};
+
+	class FOptionRollbackCEFCommand final : public IAutomationLatentCommand
+	{
+	public:
+		FOptionRollbackCEFCommand(const TSharedRef<FOptionRollbackCEFState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+
+		virtual bool Update() override
+		{
+			if (State->Stage == 0)
+			{
+				State->Widget = MakeWidget();
+				State->Sink = NewObject<UEChartsWidgetTestSink>();
+				State->Sink->AddToRoot();
+				State->Widget->OnOptionApplied.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleOptionApplied);
+				State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
+				State->SlateWidget = State->Widget->TakeWidget();
+				State->Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+				Advance();
+				return false;
+			}
+			if (State->Stage == 1 && State->Widget->RuntimeState == EEChartsRuntimeState::Ready)
+			{
+				State->ExpectedOptionResults = State->Sink->OptionResultCount + 1;
+				Test->TestTrue(TEXT("CEF accepts known-good transactional option"), State->Widget->SetEChartsOptionJSON(TEXT(
+					"{\"title\":{\"text\":\"known-good\"},\"tooltip\":{},\"xAxis\":{\"type\":\"category\",\"data\":[\"A\",\"B\"]},\"yAxis\":{\"type\":\"value\"},\"series\":[{\"type\":\"line\",\"data\":[3,1]}]}")));
+				Test->TestEqual(TEXT("CEF candidate does not commit template before ACK"), State->Widget->CurrentTemplate, EEChartsTemplate::SegmentedAreaLine);
+				Advance();
+				return false;
+			}
+			if (State->Stage == 2 && State->Sink->OptionResultCount >= State->ExpectedOptionResults)
+			{
+				Test->TestTrue(TEXT("CEF applied known-good transactional option"), State->Sink->bLastOptionSuccess);
+				Test->TestEqual(TEXT("CEF successful ACK commits CustomOption"), State->Widget->CurrentTemplate, EEChartsTemplate::CustomOption);
+				State->LastGoodBase64 = State->Widget->GetCachedOptionBase64ForTesting();
+				Test->TestTrue(TEXT("CEF successful ACK commits last-good cache"), !State->LastGoodBase64.IsEmpty());
+				Probe(TEXT("TX_GOOD"), TEXT("o.title[0].text==='known-good'&&o.series.length===1&&o.series[0].data.length===2"));
+				Advance();
+				return false;
+			}
+			if (State->Stage == 3 && ProbeSucceeded(TEXT("TX_GOOD")))
+			{
+				State->ExpectedOptionResults = State->Sink->OptionResultCount + 1;
+				Test->TestTrue(TEXT("CEF structurally accepts semantic attacker option"), State->Widget->SetEChartsOptionJSON(TEXT(
+					"{\"title\":{\"text\":\"attacker-replacement\"},\"xAxis\":{},\"yAxis\":{},\"series\":[{\"type\":\"line\",\"xAxisIndex\":999,\"data\":[9]}]}")));
+				Test->TestEqual(TEXT("CEF attacker candidate leaves committed template unchanged"), State->Widget->CurrentTemplate, EEChartsTemplate::CustomOption);
+				Advance();
+				return false;
+			}
+			if (State->Stage == 4 && State->Sink->OptionResultCount >= State->ExpectedOptionResults)
+			{
+				Test->TestFalse(TEXT("CEF reports semantic option failure"), State->Sink->bLastOptionSuccess);
+				Test->TestEqual(TEXT("Semantic option failure remains non-terminal"), State->Widget->RuntimeState, EEChartsRuntimeState::Ready);
+				Test->TestEqual(TEXT("Semantic option failure preserves last-good cache"), State->Widget->GetCachedOptionBase64ForTesting(), State->LastGoodBase64);
+				Test->TestTrue(TEXT("Semantic option failure clears rejected candidate"), State->Widget->GetPendingOptionBase64ForTesting().IsEmpty());
+				Probe(TEXT("TX_ROLLBACK"), TEXT("o.title[0].text==='known-good'&&o.series.length===1&&o.series[0].data.length===2"));
+				Advance();
+				return false;
+			}
+			if (State->Stage == 5 && ProbeSucceeded(TEXT("TX_ROLLBACK")))
+			{
+				State->ExpectedOptionResults = State->Sink->OptionResultCount + 1;
+				State->SlateWidget.Reset();
+				State->Widget->ReleaseSlateResources(false);
+				State->SlateWidget = State->Widget->TakeWidget();
+				Advance();
+				return false;
+			}
+			if (State->Stage == 6 && State->Widget->RuntimeState == EEChartsRuntimeState::Ready &&
+				State->Sink->OptionResultCount >= State->ExpectedOptionResults)
+			{
+				Test->TestTrue(TEXT("CEF rebuild replays last successful option"), State->Sink->bLastOptionSuccess);
+				Probe(TEXT("TX_REBUILD"), TEXT("o.title[0].text==='known-good'&&o.series.length===1&&o.series[0].data.length===2"));
+				Advance();
+				return false;
+			}
+			if (State->Stage == 7 && ProbeSucceeded(TEXT("TX_REBUILD")))
+			{
+				State->Cleanup();
+				return true;
+			}
+			if (FPlatformTime::Seconds() >= State->Deadline)
+			{
+				Test->AddError(FString::Printf(TEXT("Timed out in option rollback CEF stage %d; state=%d error=%s"),
+					State->Stage, static_cast<int32>(State->Widget->RuntimeState), *State->Widget->LastError));
+				State->Cleanup();
+				return true;
+			}
+			return false;
+		}
+
+	private:
+		void Advance() { ++State->Stage; State->Deadline = FPlatformTime::Seconds() + 30.0; }
+		void Probe(const FString& Name, const FString& Condition)
+		{
+			State->ExpectedProbes = State->Sink->AdvancedProbeCount + 1;
+			State->Widget->ExecuteJavascript(FString::Printf(TEXT(
+				"(function(){var o=window.UEEChartsHost.getOptionForTesting();var ok=(%s);var t=o.title&&o.title[0]?o.title[0].text:'none';var n=o.series?o.series.length:-1;var d=n>0&&o.series[0].data?o.series[0].data.length:-1;console.log('__UE_ECHARTS_TEST_ADVANCED__:%s:'+(ok?'OK':('BAD:'+t+':'+n+':'+d)));}());"),
+				*Condition, *Name));
+		}
+		bool ProbeSucceeded(const FString& Name)
+		{
+			if (State->Sink->AdvancedProbeCount < State->ExpectedProbes) return false;
+			const FString Expected = Name + TEXT(":OK");
+			Test->TestEqual(*FString::Printf(TEXT("CEF %s probe"), *Name), State->Sink->LastAdvancedProbe, Expected);
+			return true;
+		}
+
+		TSharedRef<FOptionRollbackCEFState> State;
 		FAutomationTestBase* Test;
 	};
 }
@@ -248,19 +378,20 @@ bool FEChartsAdvancedValidationAndCommandTest::RunTest(const FString& Parameters
 
 	const FString Hostile = TEXT("{\"title\":{\"text\":\"</script> \\\"quote\\\" \\\\ slash 数据 😀\"},\"series\":[{\"type\":\"line\",\"data\":[1]}]}");
 	TestTrue(TEXT("Valid hostile option is accepted"), Widget->SetEChartsOptionJSON(Hostile));
-	TestEqual(TEXT("Valid option selects CustomOption"), Widget->CurrentTemplate, EEChartsTemplate::CustomOption);
-	const FString Cached = Widget->GetCachedOptionBase64ForTesting();
-	TestFalse(TEXT("Cached option is Base64, not raw JSON"), Cached.Contains(TEXT("</script>")));
-	TestTrue(TEXT("Cached option is non-empty"), !Cached.IsEmpty());
+	TestEqual(TEXT("Unacknowledged option does not commit template"), Widget->CurrentTemplate, EEChartsTemplate::SegmentedAreaLine);
+	TestTrue(TEXT("Unacknowledged option does not replace last-good cache"), Widget->GetCachedOptionBase64ForTesting().IsEmpty());
+	const FString Candidate = Widget->GetPendingOptionBase64ForTesting();
+	TestFalse(TEXT("Pending option is Base64, not raw JSON"), Candidate.Contains(TEXT("</script>")));
+	TestTrue(TEXT("Pending option is non-empty"), !Candidate.IsEmpty());
 	TestFalse(TEXT("Oversized UTF-8 option is rejected"), Widget->SetEChartsOptionJSON(
 		FString(TEXT("{\"x\":\"")) + FString::ChrN(16 * 1024 * 1024 + 1, TEXT('a')) + TEXT("\"}")));
-	TestEqual(TEXT("Rejected option preserves prior cache"), Widget->GetCachedOptionBase64ForTesting(), Cached);
+	TestEqual(TEXT("Rejected option preserves prior pending candidate"), Widget->GetPendingOptionBase64ForTesting(), Candidate);
 
-	const FString OptionCommand = FEChartsWidgetJavascript::BuildApplyOptionCommand(41, Cached);
+	const FString OptionCommand = FEChartsWidgetJavascript::BuildApplyOptionCommand(41, Candidate);
 	TestTrue(TEXT("Option command uses fixed Host API"), OptionCommand.StartsWith(TEXT("window.UEEChartsHost.applyOptionBase64(41,\"")));
 	TestFalse(TEXT("Option command excludes raw hostile content"), OptionCommand.Contains(TEXT("</script>")));
 	TestTrue(TEXT("Unsafe option payload cannot enter command"), FEChartsWidgetJavascript::BuildApplyOptionCommand(41, TEXT("x\");alert(1)//")).IsEmpty());
-	TestTrue(TEXT("Zero request id cannot enter option command"), FEChartsWidgetJavascript::BuildApplyOptionCommand(0, Cached).IsEmpty());
+	TestTrue(TEXT("Zero request id cannot enter option command"), FEChartsWidgetJavascript::BuildApplyOptionCommand(0, Candidate).IsEmpty());
 	TestEqual(TEXT("Interaction command is enum constrained"),
 		FEChartsWidgetJavascript::BuildSetInteractionModeCommand(42, EEChartsInteractionMode::FullHover),
 		FString(TEXT("window.UEEChartsHost.setInteractionMode(42,\"FullHover\");")));
@@ -307,10 +438,24 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 
 	const int64 OptionRequest = Widget->GetPendingOptionRequestIdForTesting();
 	const int64 InteractionRequest = Widget->GetPendingInteractionRequestIdForTesting();
-	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:0:setOption failed"), OptionRequest), FString(), 0);
-	TestEqual(TEXT("Option failure has a dedicated result"), Sink->OptionResultCount, 1);
+	TestTrue(TEXT("Newer candidate queues behind the in-flight transaction"), Widget->SetEChartsOptionJSON(TEXT(
+		"{\"title\":{\"text\":\"bad\"},\"series\":[{\"type\":\"line\",\"xAxisIndex\":999,\"data\":[9]}]}")));
+	TestEqual(TEXT("Queued candidate does not replace in-flight request id"), Widget->GetPendingOptionRequestIdForTesting(), OptionRequest);
+	TestTrue(TEXT("Newer candidate is retained while first request is in flight"), !Widget->GetPendingOptionBase64ForTesting().IsEmpty());
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:1:CustomOption applied"), OptionRequest), FString(), 0);
+	TestEqual(TEXT("Option success has a dedicated result"), Sink->OptionResultCount, 1);
+	TestTrue(TEXT("Option success commits CustomOption"), Sink->bLastOptionSuccess);
+	TestEqual(TEXT("Option success commits template"), Widget->CurrentTemplate, EEChartsTemplate::CustomOption);
+	const FString LastGood = Widget->GetCachedOptionBase64ForTesting();
+	TestTrue(TEXT("Option success commits last-good cache"), !LastGood.IsEmpty());
+	const int64 FailedOptionRequest = Widget->GetPendingOptionRequestIdForTesting();
+	TestTrue(TEXT("Queued candidate receives a new serialized request id"), FailedOptionRequest != OptionRequest);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_OPTION_RESULT__:1:%lld:0:setOption failed; previous chart restored"), FailedOptionRequest), FString(), 0);
+	TestEqual(TEXT("Option failure has a dedicated result"), Sink->OptionResultCount, 2);
 	TestFalse(TEXT("Option failure reports false"), Sink->bLastOptionSuccess);
 	TestEqual(TEXT("Option failure is non-terminal"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
+	TestEqual(TEXT("Option failure preserves last-good cache"), Widget->GetCachedOptionBase64ForTesting(), LastGood);
+	TestTrue(TEXT("Option failure clears rejected candidate"), Widget->GetPendingOptionBase64ForTesting().IsEmpty());
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:1:%lld:1:Disabled"), InteractionRequest), FString(), 0);
 	TestEqual(TEXT("Interaction ACK has a dedicated result"), Sink->InteractionResultCount, 1);
 	TestTrue(TEXT("Interaction ACK reports success"), Sink->bLastInteractionSuccess);
@@ -372,6 +517,20 @@ bool FEChartsAdvancedCEFIntegrationTest::RunTest(const FString& Parameters)
 	}
 	const TSharedRef<EChartsAdvancedTests::FAdvancedCEFState> State = MakeShared<EChartsAdvancedTests::FAdvancedCEFState>();
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FAdvancedCEFCommand(State, this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsOptionRollbackCEFIntegrationTest,
+	"EChartsWidget.Advanced.Integration.CEFOptionTransaction", EChartsAdvancedTests::Flags)
+bool FEChartsOptionRollbackCEFIntegrationTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI")))
+	{
+		AddInfo(TEXT("Transactional option rollback requires D3D12 CEF."));
+		return true;
+	}
+	const TSharedRef<EChartsAdvancedTests::FOptionRollbackCEFState> State = MakeShared<EChartsAdvancedTests::FOptionRollbackCEFState>();
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FOptionRollbackCEFCommand(State, this));
 	return true;
 }
 
