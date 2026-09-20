@@ -478,6 +478,27 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Old-generation JavaScript result is ignored"), Sink->JavaScriptResultCount, 1);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
 	TestEqual(TEXT("Rebuild replays option and interaction only"), Widget->GetPendingAdvancedRequestCountForTesting(), 2);
+	const int32 ResultsBeforeReplayFailure = Sink->OptionResultCount;
+	const int64 ReplayRequest = Widget->GetPendingOptionRequestIdForTesting();
+	const int64 RebuildInteractionRequest = Widget->GetPendingInteractionRequestIdForTesting();
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(
+		TEXT("__UE_ECHARTS_OPTION_RESULT__:2:%lld:0:replay failed; previous chart restored"), ReplayRequest), FString(), 0);
+	TestEqual(TEXT("Cached replay failure broadcasts exactly once"), Sink->OptionResultCount, ResultsBeforeReplayFailure + 1);
+	TestFalse(TEXT("Cached replay failure reports false"), Sink->bLastOptionSuccess);
+	TestEqual(TEXT("Cached replay failure remains non-terminal"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
+	TestEqual(TEXT("Cached replay failure clears its in-flight request"), Widget->GetPendingOptionRequestIdForTesting(), int64(0));
+	TestEqual(TEXT("Cached replay failure does not immediately retry in the same generation"), Widget->GetPendingAdvancedRequestCountForTesting(), 1);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_WARNING__:2:unrelated"), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(
+		TEXT("__UE_ECHARTS_INTERACTION_RESULT__:2:%lld:1:Disabled"), RebuildInteractionRequest), FString(), 0);
+	TestEqual(TEXT("Unrelated messages do not restart cached replay"), Widget->GetPendingOptionRequestIdForTesting(), int64(0));
+	TestEqual(TEXT("Unrelated messages do not duplicate option result"), Sink->OptionResultCount, ResultsBeforeReplayFailure + 1);
+	TestEqual(TEXT("All generation-two advanced requests settle"), Widget->GetPendingAdvancedRequestCountForTesting(), 0);
+	Widget->ReleaseSlateResources(false);
+	Widget->PrepareRebuildForTesting();
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
+	TestTrue(TEXT("A new generation may retry the retained last-good option"), Widget->GetPendingOptionRequestIdForTesting() > 0);
+	TestEqual(TEXT("Generation-three replay and interaction are each queued once"), Widget->GetPendingAdvancedRequestCountForTesting(), 2);
 
 	Widget->ReleaseSlateResources(false);
 	Widget->RemoveFromRoot();

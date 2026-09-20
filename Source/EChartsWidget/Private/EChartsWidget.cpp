@@ -937,7 +937,9 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			PendingOptionRequestId = 0;
 			InFlightOptionBase64.Reset();
 			bInFlightOptionIsCandidate = false;
-			bOptionReplayPending = !bSuccess && !bWasCandidate;
+			// A cached replay is attempted at most once per generation. Keep the
+			// last-good payload for a later generation, but never spin-retry it here.
+			bOptionReplayPending = false;
 			if (bSuccess)
 			{
 				if (bWasCandidate)
