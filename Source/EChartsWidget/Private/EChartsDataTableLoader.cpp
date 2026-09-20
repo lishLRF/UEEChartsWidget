@@ -46,6 +46,20 @@ FString Category(const FProperty* Property, const uint8* Row)
 		return P->Enum->GetNameStringByValue(P->GetPropertyValue(Value));
 	return FString();
 }
+void StableSortRows(TArray<FEChartsDataTableRow>& Rows, const bool bCategory, const EEChartsDataTableOrder Order)
+{
+	Algo::StableSort(Rows, [=](const auto& A, const auto& B)
+	{
+		if (A.bValidSortKey != B.bValidSortKey) return A.bValidSortKey;
+		if (!A.bValidSortKey) return false;
+		if (Order == EEChartsDataTableOrder::RowName)
+		{
+			const int32 Comparison = A.RowName.Compare(B.RowName, ESearchCase::IgnoreCase);
+			return Comparison == 0 ? A.RowNameNumber < B.RowNameNumber : Comparison < 0;
+		}
+		return bCategory ? A.Category.Compare(B.Category, ESearchCase::CaseSensitive) < 0 : A.Point.X < B.Point.X;
+	});
+}
 } // namespace
 bool EChartsDataTableLoader::Columns(UDataTable* Table, TArray<FEChartsDataTableColumn>& Out, FString& Error)
 {
@@ -114,6 +128,7 @@ bool EChartsDataTableLoader::ReadRow(
 		return false;
 	const uint8* Row = *Found;
 	auto Prop = [Table](FName Name) { return FindFProperty<FProperty>(Table->GetRowStruct(), Name); };
+	Out.RowKey = RowName;
 	Out.RowName = RowName.GetPlainNameString();
 	Out.RowNameNumber = RowName.GetNumber();
 	if (S.bCategory)
@@ -134,20 +149,47 @@ bool EChartsDataTableLoader::ReadRow(
 		return false;
 	if (!S.Mapping.SymbolSize.IsNone() && !Numeric(Prop(S.Mapping.SymbolSize), Row, Out.Point.SymbolSizeValue))
 		return false;
+	Out.bValidSortKey = true;
 	return true;
+}
+void EChartsDataTableLoader::ReadSortKey(
+	UDataTable* Table, FName RowName, const FEChartsDataTableSnapshot& S, FEChartsDataTableRow& Out)
+{
+	check(IsInGameThread());
+	Out.RowKey = RowName;
+	Out.RowName = RowName.GetPlainNameString();
+	Out.RowNameNumber = RowName.GetNumber();
+	if (S.Mapping.Order == EEChartsDataTableOrder::RowName)
+	{
+		Out.bValidSortKey = true;
+		return;
+	}
+	const uint8* const* Found = Table->GetRowMap().Find(RowName);
+	if (!Found || !*Found) return;
+	const FProperty* X = FindFProperty<FProperty>(Table->GetRowStruct(), S.Mapping.X);
+	if (S.bCategory)
+	{
+		Out.Category = Category(X, *Found);
+		Out.bValidSortKey = !Out.Category.TrimStartAndEnd().IsEmpty();
+	}
+	else
+	{
+		Out.bValidSortKey = Numeric(X, *Found, Out.Point.X);
+	}
+}
+TArray<FName> EChartsDataTableLoader::SortRowNames(
+	TArray<FEChartsDataTableRow> Rows, const bool bCategory, const EEChartsDataTableOrder Order)
+{
+	StableSortRows(Rows, bCategory, Order);
+	TArray<FName> Result;
+	Result.Reserve(Rows.Num());
+	for (const FEChartsDataTableRow& Row : Rows) Result.Add(Row.RowKey);
+	return Result;
 }
 FEChartsSeriesData EChartsDataTableLoader::Convert(
     TArray<FEChartsDataTableRow> Rows, bool bCategory, bool b3D, EEChartsDataTableOrder Order)
 {
-	Algo::StableSort(Rows, [=](const auto& A, const auto& B)
-	{
-		if (Order == EEChartsDataTableOrder::RowName)
-		{
-			const int32 Comparison = A.RowName.Compare(B.RowName, ESearchCase::IgnoreCase);
-			return Comparison == 0 ? A.RowNameNumber < B.RowNameNumber : Comparison < 0;
-		}
-		return bCategory ? A.Category.Compare(B.Category, ESearchCase::CaseSensitive) < 0 : A.Point.X < B.Point.X;
-	});
+	StableSortRows(Rows, bCategory, Order);
 	FEChartsSeriesData Series;
 	Series.Type = b3D         ? EEChartsSeriesDataType::Data3D
 	              : bCategory ? EEChartsSeriesDataType::Category

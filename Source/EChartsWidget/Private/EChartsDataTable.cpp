@@ -69,6 +69,12 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 	check(IsInGameThread());
 	if (Request != DataTableRequest || DataTableLoadState != EEChartsDataTableLoadState::Reading || !DataTableSnapshot)
 		return false;
+	if (DataTableSnapshot->bStreaming && DataTableSnapshot->bSortKeysReady &&
+		StreamState != EEChartsDataTableStreamState::Preparing &&
+		PreparedStreamRows.Num() - CurrentRow >= DataTableSnapshot->Budget)
+	{
+		return true;
+	}
 	// FTSTicker pumps new delegates within the same Tick. This guard belongs to the widget, not a request.
 	if (LastDataTableReadFrame == GFrameCounter)
 		return true;
@@ -87,13 +93,28 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 		FailDataTableLoad(Error.IsEmpty() ? TEXT("DataTable schema changed during snapshot.") : Error);
 		return false;
 	}
+	if (S->bStreaming && !S->bSortKeysReady)
+	{
+		const int32 End = S->SortKeysProcessed + FMath::Min(S->Budget, TotalRows - S->SortKeysProcessed);
+		for (; S->SortKeysProcessed < End; ++S->SortKeysProcessed)
+		{
+			FEChartsDataTableRow SortKey;
+			EChartsDataTableLoader::ReadSortKey(MappedDataTable, S->RowNames[S->SortKeysProcessed], *S, SortKey);
+			S->Rows.Add(MoveTemp(SortKey));
+		}
+		if (S->SortKeysProcessed < TotalRows) return true;
+		DataTableTickerHandle.Reset();
+		SortStreamRowNames(Request);
+		return false;
+	}
 	const int32 End = RowsProcessed + FMath::Min(S->Budget, TotalRows - RowsProcessed);
 	for (; RowsProcessed < End; ++RowsProcessed)
 	{
 		FEChartsDataTableRow Row;
 		if (EChartsDataTableLoader::ReadRow(MappedDataTable, S->RowNames[RowsProcessed], *S, Row))
 		{
-			S->Rows.Add(MoveTemp(Row));
+			if (S->bStreaming) AppendPreparedStreamRow(MoveTemp(Row));
+			else S->Rows.Add(MoveTemp(Row));
 			++RowsSucceeded;
 		}
 		else
@@ -107,9 +128,24 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 		CancelDataTableLoad();
 		return false;
 	}
-	if (StreamState != EEChartsDataTableStreamState::Preparing && RowsSucceeded > FEChartsPayloadBuilder::MaxPointCount)
+	if (!S->bStreaming && RowsSucceeded > FEChartsPayloadBuilder::MaxPointCount)
 	{
 		FailDataTableLoad(TEXT("DataTable exceeds the 100000 point limit."));
+		return false;
+	}
+	if (S->bStreaming)
+	{
+		StartPreparedStream(Request);
+		if (Request != DataTableRequest || !IsStreamingActive()) return false;
+		if (RowsProcessed < TotalRows) return true;
+		DataTableTickerHandle.Reset();
+		DataTableSnapshot.Reset();
+		DataTableLoadState = EEChartsDataTableLoadState::Idle;
+		bStreamProductionComplete = true;
+		if (PreparedStreamRows.Num() == 0)
+		{
+			FailStreaming(TEXT("DataTable contains no valid rows to stream."));
+		}
 		return false;
 	}
 	if (RowsProcessed < TotalRows)
@@ -121,11 +157,6 @@ bool UEChartsWidget::ReadDataTableBatch(uint64 Request)
 void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 {
 	check(IsInGameThread());
-	if (StreamState == EEChartsDataTableStreamState::Preparing)
-	{
-		PrepareStreamRows(Request);
-		return;
-	}
 	DataTableLoadState = EEChartsDataTableLoadState::Processing;
 	auto S = MoveTemp(DataTableSnapshot);
 	TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> Series;
@@ -255,13 +286,13 @@ void UEChartsWidget::CancelDataTableLoad()
 {
 	if (IsInGameThread())
 	{
-		if (StreamState == EEChartsDataTableStreamState::Preparing) StopDataTableStreaming();
+		if (DataTableSnapshot && DataTableSnapshot->bStreaming) StopDataTableStreaming();
 		StopDataTableLoad(true);
 	}
 }
 void UEChartsWidget::FailDataTableLoad(const FString& Error)
 {
-	if (StreamState == EEChartsDataTableStreamState::Preparing)
+	if (DataTableSnapshot && DataTableSnapshot->bStreaming)
 	{
 		FailStreaming(Error);
 		LastDataTableError = Error;

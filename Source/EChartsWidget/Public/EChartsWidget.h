@@ -232,8 +232,11 @@ public:
 	bool IsDataTablePrepareScheduledForTesting() const { return DataTableTickerHandle.IsValid(); }
 	float GetStreamIntervalForTesting() const { return StreamInterval; }
 	int32 GetStreamRowsPerStepForTesting() const { return StreamRowsPerStep; }
+	bool IsApplyInFlightForTesting() const { return InFlightRevision > 0; }
 	int32 GetPreparedStreamCountForTesting() const { return PreparedStreamRows.Num(); }
+	int32 GetStreamSortKeysProcessedForTesting() const;
 	int32 GetStreamTickCallsForTesting() const { return StreamTickCallsForTesting; }
+	int32 GetSameFrameStreamTickCallsForTesting() const { return SameFrameStreamTickCallsForTesting; }
 	uint32 GetNumericStreamAllocatedBytesForTesting() const { return SeriesData[0].Numeric2D.GetAllocatedSize(); }
 #endif
 
@@ -265,7 +268,9 @@ private:
 	void CancelStreamTicker();
 	void ScheduleStreamTicker();
 	bool StreamStep(uint64 Request);
-	void PrepareStreamRows(uint64 Request);
+	void SortStreamRowNames(uint64 Request);
+	void AppendPreparedStreamRow(struct FEChartsDataTableRow&& Row);
+	void StartPreparedStream(uint64 Request);
 	void FailStreaming(const FString& Error);
 	void CompleteStreamIfAcknowledged(int64 Revision);
 	void TrimStreamWindow();
@@ -278,6 +283,7 @@ private:
 	int32 StreamRowsPerStep = 1;
 	bool bStreamLoop = false;
 	bool bStreamingSuspended = false;
+	bool bStreamProductionComplete = false;
 	bool bPreserveStreamCategoryOrder = false;
 	int64 StreamFinalRevision = 0;
 	UPROPERTY(Transient) TObjectPtr<UDataTable> MappedDataTable;
@@ -310,6 +316,8 @@ private:
 	bool bForceWebGLUnavailableForTesting = false;
 	int32 DataTableWorkerSnapshotPointCountForTesting = 0;
 	int32 StreamTickCallsForTesting = 0;
+	int32 SameFrameStreamTickCallsForTesting = 0;
+	uint64 LastStreamTickFrameForTesting = MAX_uint64;
 	bool bReportSeriesCountForTesting = false;
 	FString InitializationPayloadForTesting = TEXT("{}");
 #endif

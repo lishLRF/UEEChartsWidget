@@ -6,10 +6,12 @@
 // All UObject/reflection access is confined to these GameThread helpers. Worker input contains values only.
 struct FEChartsDataTableRow
 {
+	FName RowKey;
 	FString RowName;
 	int32 RowNameNumber = 0;
 	FString Category;
 	FEChartsDataPoint3D Point;
+	bool bValidSortKey = false;
 };
 struct FEChartsDataTableSnapshot
 {
@@ -19,6 +21,9 @@ struct FEChartsDataTableSnapshot
 	EEChartsTemplate Template;
 	bool bCategory = false;
 	bool b3D = false;
+	bool bStreaming = false;
+	bool bSortKeysReady = false;
+	int32 SortKeysProcessed = 0;
 	int32 Budget = 256;
 };
 namespace EChartsDataTableLoader
@@ -26,6 +31,9 @@ namespace EChartsDataTableLoader
 bool Columns(UDataTable* Table, TArray<FEChartsDataTableColumn>& Out, FString& Error);
 bool Validate(UDataTable* Table, const FEChartsDataTableMapping& Mapping, EEChartsTemplate Template, bool& bCategory,
               FString& Error);
+void ReadSortKey(UDataTable* Table, FName RowName, const FEChartsDataTableSnapshot& Snapshot,
+	FEChartsDataTableRow& Out);
 bool ReadRow(UDataTable* Table, FName RowName, const FEChartsDataTableSnapshot& Snapshot, FEChartsDataTableRow& Out);
+TArray<FName> SortRowNames(TArray<FEChartsDataTableRow> Rows, bool bCategory, EEChartsDataTableOrder Order);
 FEChartsSeriesData Convert(TArray<FEChartsDataTableRow> Rows, bool bCategory, bool b3D, EEChartsDataTableOrder Order);
 } // namespace EChartsDataTableLoader

@@ -1,4 +1,5 @@
 #include "EChartsWidget.h"
+#include "EChartsDataTableLoader.h"
 
 #include "Containers/Ticker.h"
 #include "HAL/PlatformTime.h"
@@ -532,7 +533,7 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 {
 	bStreamingSuspended = true;
 	CancelStreamTicker();
-	if (StreamState == EEChartsDataTableStreamState::Preparing)
+	if (DataTableSnapshot && DataTableSnapshot->bStreaming)
 	{
 		if (DataTableTickerHandle.IsValid()) FTSTicker::GetCoreTicker().RemoveTicker(DataTableTickerHandle);
 		DataTableTickerHandle.Reset();

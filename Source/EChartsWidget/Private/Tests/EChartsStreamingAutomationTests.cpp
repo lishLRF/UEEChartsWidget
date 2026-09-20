@@ -79,7 +79,7 @@ public:
             for (int32 I = 5; I > 0; --I) { FEChartsDataTableTestRow R; R.X = I; R.Y = I * 10; R.Category = FString::FromInt(I % 2); Table->AddRow(FName(*FString::FromInt(I)), R); }
             FEChartsDataTableMapping M; M.X = Mode == 1 ? TEXT("Category") : TEXT("X"); M.Y = TEXT("Y"); M.Z = TEXT("Z");
             W->SetDataTableMapping(Table, M); W->SetTimeSeriesEnabled(true); W->SetTimeSeriesWindow(3);
-            if (!Test->TestTrue(TEXT("Enabled start accepted"), W->StartDataTableStreaming(0.05f, 2, bLoop, 2))) { Cleanup(); return true; }
+            if (!Test->TestTrue(TEXT("Enabled start accepted"), W->StartDataTableStreaming(0.05f, 1, bLoop, 1))) { Cleanup(); return true; }
             Test->TestEqual(TEXT("Preparation is asynchronous"), W->StreamState, EEChartsDataTableStreamState::Preparing);
             Test->TestEqual(TEXT("No eager display"), Count(), 0);
             return false;
@@ -88,13 +88,15 @@ public:
         if (Stage == 0 && W->StreamState == EEChartsDataTableStreamState::Playing)
         {
             Test->TestEqual(TEXT("Started once"), S->StreamStartedCount, 1);
-            Test->TestTrue(TEXT("Preparation frame budget"), S->MaxTableBatch <= 2);
-            Test->TestTrue(TEXT("No complete snapshot installation"), Count() <= 2);
+            Test->TestTrue(TEXT("Preparation frame budget"), S->MaxTableBatch <= 1);
+            Test->TestTrue(TEXT("No complete snapshot installation"), Count() <= 1);
             PhaseStart = FPlatformTime::Seconds(); Stage = 1;
         }
         if (Stage == 1 && W->StreamedRows > 0)
         {
-            Test->TestEqual(TEXT("First timer appends fixed batch"), W->StreamedRows, int64(2));
+            Test->TestEqual(TEXT("First timer appends fixed batch"), W->StreamedRows, int64(1));
+            Test->TestTrue(TEXT("First streamed batch is submitted before full row preparation"), W->RowsProcessed < W->TotalRows);
+            Test->TestTrue(TEXT("First streamed batch has an in-flight Apply"), W->IsApplyInFlightForTesting());
             Test->TestEqual(TEXT("No ACK required before next step"), W->LastAppliedRevision, int64(0));
             SavedRows = W->StreamedRows; W->PauseDataTableStreaming(); PhaseStart = FPlatformTime::Seconds(); Stage = 2;
         }
@@ -157,7 +159,7 @@ bool FEChartsStreamingBoundariesTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Interval lower clamp"), W->GetStreamIntervalForTesting(), 0.01f);
     TestEqual(TEXT("Batch lower clamp"), W->GetStreamRowsPerStepForTesting(), 1);
     FTSTicker::GetCoreTicker().Tick(0.01f);
-    TestEqual(TEXT("Preparation lower budget"), W->RowsProcessed, 1);
+    TestEqual(TEXT("Sort-key preparation lower budget"), W->GetStreamSortKeysProcessedForTesting(), 1);
     W->ReleaseSlateResources(false);
     TestFalse(TEXT("Release removes preparing handle"), W->IsDataTablePrepareScheduledForTesting());
     TestEqual(TEXT("Release preserves preparation intent"), W->StreamState, EEChartsDataTableStreamState::Preparing);
@@ -239,7 +241,7 @@ public:
         if (Stage == 2 && W->StreamedRows >= SavedRows + 10)
         {
             Test->TestEqual(TEXT("Rebuild no same-frame duplicate advancement"), S->StreamSameFrameCount, 0);
-            if (Action == 4) Test->TestEqual(TEXT("Pause/resume callback never leaves duplicate timer delegates"), W->GetStreamTickCallsForTesting(), S->StreamProgressCount);
+            if (Action == 4) Test->TestEqual(TEXT("Pause/resume callback never leaves duplicate timer delegates"), W->GetSameFrameStreamTickCallsForTesting(), 0);
             W->StopDataTableStreaming(); Test->TestFalse(TEXT("Stop releases timer"), W->IsDataTableStreamScheduledForTesting());
             Test->TestEqual(TEXT("Stop releases prepared cache"), W->GetPreparedStreamCountForTesting(), 0);
             Test->TestTrue(TEXT("Stop keeps display cache"), W->GetSeriesData(0).Num() > 0);
@@ -347,9 +349,12 @@ public:
         if (FPlatformTime::Seconds() - Start > 40 || W->StreamState == EEChartsDataTableStreamState::Error)
         { Test->AddError(FString::Printf(TEXT("CEF stream failed/timeout at stage %d: %s"), Stage, *W->LastError)); Cleanup(); return true; }
         if (Stage == 0 && W->RuntimeState == EEChartsRuntimeState::Ready)
-        { W->StartDataTableStreaming(0.3f, 1, bLoop, 2); Stage = 1; }
+        { W->StartDataTableStreaming(0.3f, 1, bLoop, 1); Stage = 1; }
         if (Stage == 1 && W->LastAppliedPointCount == 1)
-        { W->PauseDataTableStreaming(); Probe(false); Stage = 2; }
+        {
+            Test->TestTrue(TEXT("Real CEF applies the first row before full row preparation"), W->RowsProcessed < W->TotalRows);
+            W->PauseDataTableStreaming(); Probe(false); Stage = 2;
+        }
         if (Stage == 2 && S->DataOptionReportCount == 1)
         {
             Test->TestTrue(TEXT("Real CEF displays first streamed row before full table"), S->bLastDataOptionSucceeded);

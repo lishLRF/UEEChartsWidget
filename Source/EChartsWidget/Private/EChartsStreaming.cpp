@@ -55,6 +55,7 @@ bool UEChartsWidget::StartDataTableStreaming(float IntervalSeconds, int32 RowsPe
 	StreamInterval = FMath::Clamp(FMath::IsFinite(IntervalSeconds) ? IntervalSeconds : 0.1f, 0.01f, 60.0f);
 	StreamRowsPerStep = FMath::Clamp(RowsPerStep, 1, 256);
 	bStreamLoop = Loop;
+	bStreamProductionComplete = false;
 	CurrentRow = 0; LoopCount = 0; StreamedRows = 0;
 	LoadDataTable(PreparationRowsPerFrame);
 	if (DataTableLoadState != EEChartsDataTableLoadState::Reading)
@@ -65,41 +66,67 @@ bool UEChartsWidget::StartDataTableStreaming(float IntervalSeconds, int32 RowsPe
 	// The preparation shares the snapshot reader, but never owns a cache rollback or a bulk Apply.
 	bHasDataTableCacheSnapshot = false;
 	DataTablePreviousSeries = {};
+	DataTableSnapshot->bStreaming = true;
+	PreparedStreamRows.Type = DataTableSnapshot->b3D ? EEChartsSeriesDataType::Data3D
+		: DataTableSnapshot->bCategory ? EEChartsSeriesDataType::Category : EEChartsSeriesDataType::Numeric2D;
 	StreamState = EEChartsDataTableStreamState::Preparing;
 	return true;
 }
 
-void UEChartsWidget::PrepareStreamRows(uint64 Request)
+void UEChartsWidget::SortStreamRowNames(const uint64 Request)
 {
 	DataTableLoadState = EEChartsDataTableLoadState::Processing;
-	auto Snapshot = MoveTemp(DataTableSnapshot);
+	auto Snapshot = DataTableSnapshot;
+	auto SortKeys = MoveTemp(Snapshot->Rows);
+	const bool bCategory = Snapshot->bCategory;
+	const EEChartsDataTableOrder Order = Snapshot->Mapping.Order;
 	const TWeakObjectPtr<UEChartsWidget> WeakThis(this);
-	Async(EAsyncExecution::ThreadPool, [WeakThis, Request, Snapshot = MoveTemp(Snapshot)]() mutable
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Request, SortKeys = MoveTemp(SortKeys), bCategory, Order]() mutable
 	{
-		auto Result = EChartsDataTableLoader::Convert(MoveTemp(Snapshot->Rows), Snapshot->bCategory,
-			Snapshot->b3D, Snapshot->Mapping.Order);
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, Request, Result = MoveTemp(Result)]() mutable
+		auto RowNames = EChartsDataTableLoader::SortRowNames(MoveTemp(SortKeys), bCategory, Order);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Request, RowNames = MoveTemp(RowNames)]() mutable
 		{
 			UEChartsWidget* W = WeakThis.Get();
-			if (!W || W->DataTableRequest != Request || W->StreamState != EEChartsDataTableStreamState::Preparing) return;
+			if (!W || W->DataTableRequest != Request || !W->DataTableSnapshot ||
+				!W->DataTableSnapshot->bStreaming || !W->IsStreamingActive()) return;
 			if (W->RuntimeState == EEChartsRuntimeState::Error) { W->FailStreaming(W->LastError); return; }
-			if (Result.Num() == 0) { W->FailStreaming(TEXT("DataTable contains no valid rows to stream.")); return; }
-			if (W->SeriesData[0].Type != EEChartsSeriesDataType::Unset && W->SeriesData[0].Type != Result.Type)
+			W->DataTableSnapshot->RowNames = MoveTemp(RowNames);
+			W->DataTableSnapshot->Rows.Reset();
+			W->DataTableSnapshot->bSortKeysReady = true;
+			W->DataTableLoadState = EEChartsDataTableLoadState::Reading;
+			if (!W->bStreamingSuspended && !W->DataTableTickerHandle.IsValid())
 			{
-				W->FailStreaming(TEXT("Series 0 data type is incompatible with the DataTable stream. Clear it before starting."));
-				return;
+				W->DataTableTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+					FTickerDelegate::CreateWeakLambda(W, [W, Request](float) { return W->ReadDataTableBatch(Request); }),
+					0.0001f);
 			}
-			W->PreparedStreamRows = MoveTemp(Result);
-			W->bPreserveStreamCategoryOrder = W->PreparedStreamRows.Type == EEChartsSeriesDataType::Category;
-			W->XAxisMode = W->PreparedStreamRows.Type == EEChartsSeriesDataType::Category ? EEChartsXAxisMode::Category : EEChartsXAxisMode::ShowAll;
-			W->DataTableLoadState = EEChartsDataTableLoadState::Idle;
-			W->StreamState = EEChartsDataTableStreamState::Playing;
-			W->TrimStreamWindow();
-			const uint64 StreamRequest = W->StreamRequest;
-			W->OnDataTableStreamingStarted.Broadcast();
-			if (StreamRequest == W->StreamRequest) W->ScheduleStreamTicker();
 		});
 	});
+}
+
+void UEChartsWidget::AppendPreparedStreamRow(FEChartsDataTableRow&& Row)
+{
+	if (PreparedStreamRows.Type == EEChartsSeriesDataType::Data3D) PreparedStreamRows.Data3D.Add(Row.Point);
+	else if (PreparedStreamRows.Type == EEChartsSeriesDataType::Category)
+		PreparedStreamRows.Category.Add({MoveTemp(Row.Category), Row.Point.Y});
+	else PreparedStreamRows.Numeric2D.Add({Row.Point.X, Row.Point.Y});
+}
+
+void UEChartsWidget::StartPreparedStream(const uint64 Request)
+{
+	if (Request != DataTableRequest || StreamState != EEChartsDataTableStreamState::Preparing || PreparedStreamRows.Num() == 0) return;
+	if (SeriesData[0].Type != EEChartsSeriesDataType::Unset && SeriesData[0].Type != PreparedStreamRows.Type)
+	{
+		FailStreaming(TEXT("Series 0 data type is incompatible with the DataTable stream. Clear it before starting."));
+		return;
+	}
+	bPreserveStreamCategoryOrder = PreparedStreamRows.Type == EEChartsSeriesDataType::Category;
+	XAxisMode = bPreserveStreamCategoryOrder ? EEChartsXAxisMode::Category : EEChartsXAxisMode::ShowAll;
+	StreamState = EEChartsDataTableStreamState::Playing;
+	TrimStreamWindow();
+	const uint64 ActiveStreamRequest = StreamRequest;
+	OnDataTableStreamingStarted.Broadcast();
+	if (Request == DataTableRequest && ActiveStreamRequest == StreamRequest) ScheduleStreamTicker();
 }
 
 void UEChartsWidget::CancelStreamTicker()
@@ -123,6 +150,8 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 {
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 	++StreamTickCallsForTesting;
+	if (LastStreamTickFrameForTesting == GFrameCounter) ++SameFrameStreamTickCallsForTesting;
+	LastStreamTickFrameForTesting = GFrameCounter;
 #endif
 	if (Request != StreamRequest || StreamState != EEChartsDataTableStreamState::Playing || bStreamingSuspended) return false;
 	if (LastStreamFrame == GFrameCounter || LastDataTableReadFrame == GFrameCounter) return true;
@@ -130,6 +159,21 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 	if (CurrentTemplate != DataTableRequestTemplate) { FailStreaming(TEXT("Template changed during streaming.")); return false; }
 	bool bCategory = false; FString Error;
 	if (!EChartsDataTableLoader::Validate(MappedDataTable, DataTableMapping, CurrentTemplate, bCategory, Error)) { FailStreaming(Error); return false; }
+	if (CurrentRow >= PreparedStreamRows.Num())
+	{
+		if (!bStreamProductionComplete) return true;
+		if (bStreamLoop)
+		{
+			CurrentRow = 0;
+			++LoopCount;
+			OnDataTableStreamLooped.Broadcast(LoopCount);
+			return Request == StreamRequest && StreamState == EEChartsDataTableStreamState::Playing && !bStreamingSuspended;
+		}
+		StreamFinalRevision = DataRevision;
+		StreamTickerHandle.Reset();
+		CompleteStreamIfAcknowledged(LastAppliedRevision);
+		return false;
+	}
 	FEChartsSeriesData& Target = SeriesData[0];
 	Target.Type = PreparedStreamRows.Type;
 	const int32 End = FMath::Min(CurrentRow + StreamRowsPerStep, PreparedStreamRows.Num());
@@ -148,7 +192,7 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 	}
 	StreamedRows += Added;
 	MarkDataChanged();
-	const bool bAtEnd = CurrentRow == PreparedStreamRows.Num();
+	const bool bAtEnd = bStreamProductionComplete && CurrentRow == PreparedStreamRows.Num();
 	if (bAtEnd && !bStreamLoop)
 	{
 		StreamFinalRevision = DataRevision;
@@ -189,8 +233,9 @@ void UEChartsWidget::StopStreaming(bool bNotify)
 	CancelStreamTicker();
 	StreamState = EEChartsDataTableStreamState::Stopped;
 	StreamFinalRevision = 0;
+	bStreamProductionComplete = false;
 	PreparedStreamRows = {};
-	if (bPreparing) StopDataTableLoad(false);
+	if (bPreparing || (DataTableSnapshot && DataTableSnapshot->bStreaming)) StopDataTableLoad(false);
 	if (bActive && bNotify) OnDataTableStreamingStopped.Broadcast();
 }
 
@@ -220,7 +265,8 @@ void UEChartsWidget::ResumeStreamingAfterRebuild()
 {
 	if (!bStreamingSuspended) return;
 	bStreamingSuspended = false;
-	if (StreamState == EEChartsDataTableStreamState::Preparing && DataTableSnapshot && !DataTableTickerHandle.IsValid())
+	if (DataTableSnapshot && DataTableSnapshot->bStreaming && DataTableLoadState == EEChartsDataTableLoadState::Reading &&
+		!DataTableTickerHandle.IsValid())
 	{
 		const uint64 Request = DataTableRequest;
 		DataTableTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
@@ -228,3 +274,10 @@ void UEChartsWidget::ResumeStreamingAfterRebuild()
 	}
 	ScheduleStreamTicker();
 }
+
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+int32 UEChartsWidget::GetStreamSortKeysProcessedForTesting() const
+{
+	return DataTableSnapshot ? DataTableSnapshot->SortKeysProcessed : 0;
+}
+#endif
