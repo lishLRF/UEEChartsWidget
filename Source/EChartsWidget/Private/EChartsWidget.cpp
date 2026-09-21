@@ -9,8 +9,10 @@
 #include "Misc/Base64.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformProcess.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 #define LOCTEXT_NAMESPACE "EChartsWidget"
 
