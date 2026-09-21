@@ -311,6 +311,7 @@ public:
 	int64 GetPendingOptionRequestIdForTesting() const { return static_cast<int64>(PendingOptionRequestId); }
 	int64 GetPendingInteractionRequestIdForTesting() const { return static_cast<int64>(PendingInteractionRequestId); }
 	int64 GetPendingLegendRequestIdForTesting() const { return static_cast<int64>(PendingLegendRequestId); }
+	const FEChartsLegendSettings& GetInFlightLegendSettingsForTesting() const { return InFlightLegendSettings; }
 	bool IsPayloadBuildInFlightForTesting() const { return bPayloadBuildInFlight; }
 	int32 GetPayloadBuildCountForTesting() const { return PayloadBuildCountForTesting; }
 	bool DidPayloadBuilderRunOnGameThreadForTesting() const { return PayloadBuildThreadFlagForTesting.IsValid() && *PayloadBuildThreadFlagForTesting; }
@@ -431,6 +432,7 @@ private:
 	bool bInFlightOptionIsCandidate = false;
 	EEChartsInteractionMode InFlightInteractionMode = EEChartsInteractionMode::ClickOnly;
 	FEChartsLegendSettings InFlightLegendSettings;
+	FEChartsLegendSettings RequestedLegendSettings;
 	bool bInteractionModeQueued = false;
 	bool bLegendSettingsQueued = false;
 	bool bOptionReplayPending = false;

@@ -209,7 +209,7 @@ namespace EChartsDataTests
 				const FString GraphicCheck = bExpectHeatmap
 					? TEXT("(function(){var g=window.UEEChartsHost.getGraphicShapeStatsForTesting();return g.heatmapRectCount>0&&g.allFinite;}())")
 					: (bExpect3D
-						? TEXT("!o.xAxis&&!o.yAxis&&!o.grid&&o.visualMap[0].dimension===3&&o.visualMap[0].min===10&&o.visualMap[0].max===100&&(o.visualMap[0].seriesIndex===0||o.visualMap[0].seriesIndex[0]===0)")
+						? TEXT("(!o.xAxis||o.xAxis.length===0)&&(!o.yAxis||o.yAxis.length===0)&&(!o.grid||o.grid.length===0)&&o.visualMap[0].dimension===3&&o.visualMap[0].min===10&&o.visualMap[0].max===100&&(o.visualMap[0].seriesIndex===0||o.visualMap[0].seriesIndex[0]===0)")
 						: TEXT("true"));
 				State->Widget->ExecuteJavascript(FString::Printf(TEXT(
 					"(function(){var o=window.UEEChartsHost.getOptionForTesting();var s=o.series[0];"
@@ -304,7 +304,7 @@ namespace EChartsDataTests
 			{
 				int64 RequestId = 0;
 				if (!State->Widget->ExecuteEChartsJavaScript(
-					TEXT("if(!host.setViewControlForTesting(17,23,180)) throw new Error('camera helper failed');"), RequestId))
+					TEXT("var s=host.dispatchViewControlForTesting(17,23,180,[1,2,3]);if(!s||s.alpha!==17||s.beta!==23||s.distance!==180||JSON.stringify(s.center)!=='[1,2,3]')throw new Error('runtime camera action failed');"), RequestId))
 				{
 					Test->AddError(TEXT("Could not dispatch deterministic CEF camera setup.")); State->Cleanup(); return true;
 				}
@@ -320,10 +320,10 @@ namespace EChartsDataTests
 			{
 				int64 RequestId = 0;
 				const FString Probe = TEXT(
-					"(function(){var o=host.getOptionForTesting(),v=o.grid3D[0].viewControl,vm=o.visualMap[0],l=o.legend[0],s=o.series[0];"
+					"(function(){var o=host.getOptionForTesting(),v=host.getRuntimeViewControlForTesting(),vm=o.visualMap[0],l=o.legend[0],s=o.series[0];"
 					"var si=vm.seriesIndex;var ok=v.alpha===17&&v.beta===23&&v.distance===180&&vm.dimension===3&&vm.min===20&&vm.max===100&&"
-					"(si===0||si[0]===0)&&s.data[1][3]===100&&!o.xAxis&&!o.yAxis&&!o.grid&&l.right==='2%'&&l.orient==='vertical'&&"
-					"l.textStyle.fontSize===18&&l.itemGap===22;console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());");
+					"JSON.stringify(v.center)==='[1,2,3]'&&(si===0||si[0]===0)&&s.data[1][3]===100&&(!o.xAxis||o.xAxis.length===0)&&(!o.yAxis||o.yAxis.length===0)&&(!o.grid||o.grid.length===0)&&l.right==='2%'&&l.orient==='vertical'&&"
+					"l.textStyle.fontSize===18&&l.itemGap===22;console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':('BAD:'+JSON.stringify({v:v,vm:vm,l:l,axes:[o.xAxis,o.yAxis,o.grid],data:s.data}))));}());");
 				if (!State->Widget->ExecuteEChartsJavaScript(Probe, RequestId))
 				{
 					Test->AddError(TEXT("Could not dispatch native 3D CEF state probe.")); State->Cleanup(); return true;
@@ -332,7 +332,7 @@ namespace EChartsDataTests
 			}
 			if (Stage == 4 && State->Sink->DataOptionReportCount > 0)
 			{
-				Test->TestTrue(TEXT("Real CEF preserves camera and applies ColorValue/legend semantics"), State->Sink->bLastDataOptionSucceeded);
+				if (!State->Sink->bLastDataOptionSucceeded) Test->AddError(FString::Printf(TEXT("Real CEF runtime state mismatch: %s"), *State->Sink->LastAdvancedProbe));
 				State->Cleanup(); return true;
 			}
 			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
@@ -347,6 +347,62 @@ namespace EChartsDataTests
 		TSharedRef<FDataBrowserState> State;
 		FAutomationTestBase* Test;
 		int32 Stage = 0;
+	};
+
+	class FCustomOptionLegendReplayCommand final : public IAutomationLatentCommand
+	{
+	public:
+		FCustomOptionLegendReplayCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+
+		virtual bool Update() override
+		{
+			if (Stage == 0)
+			{
+				State->Widget = MakeWidget(); State->Sink = NewObject<UEChartsWidgetTestSink>(); State->Sink->AddToRoot();
+				State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+				State->Widget->OnOptionApplied.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleOptionApplied);
+				State->Widget->OnLegendSettingsApplied.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleLegendSettingsApplied);
+				State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
+				FEChartsLegendSettings Legend; Legend.Position = EEChartsLegendPosition::Right; Legend.Orientation = EEChartsLegendOrientation::Vertical; Legend.FontSize = 18; Legend.ItemGap = 22;
+				State->Widget->SetLegendSettings(Legend);
+				State->Widget->SetEChartsOptionJSON(TEXT("{\"legend\":[{\"show\":false,\"left\":\"left\",\"textStyle\":{\"fontSize\":6}},{\"orient\":\"horizontal\"}],\"series\":[]}"));
+				State->SlateWidget = State->Widget->TakeWidget(); State->Widget->InitializeECharts(EEChartsTemplate::CustomOption, EEChartsInteractionMode::ClickOnly);
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0; Stage = 1; return false;
+			}
+			if (State->Sink->ErrorCount > 0) { Test->AddError(State->Sink->LastError); State->Cleanup(); return true; }
+			auto Probe = [this]()
+			{
+				int64 RequestId = 0;
+				return State->Widget->ExecuteEChartsJavaScript(TEXT("(function(){var o=host.getOptionForTesting(),a=o.legend;var ok=a.length===2&&a.every(function(l){return l.show===true&&l.right==='2%'&&l.orient==='vertical'&&l.textStyle.fontSize===18&&l.itemGap===22;});console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());"), RequestId);
+			};
+			if (Stage == 1 && State->Sink->OptionResultCount >= 1 && State->Sink->LegendResultCount >= 1)
+			{
+				if (!Probe()) { Test->AddError(TEXT("Could not probe CustomOption legend override.")); State->Cleanup(); return true; }
+				Stage = 2; State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0; return false;
+			}
+			if (Stage == 2 && State->Sink->DataOptionReportCount >= 1)
+			{
+				Test->TestTrue(TEXT("CustomOption uses Blueprint legend as final override"), State->Sink->bLastDataOptionSucceeded);
+				State->Sink->DataOptionReportCount = 0;
+				State->SlateWidget.Reset(); State->Widget->ReleaseSlateResources(false); State->SlateWidget = State->Widget->TakeWidget();
+				Stage = 3; State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0; return false;
+			}
+			if (Stage == 3 && State->Sink->OptionResultCount >= 2 && State->Sink->LegendResultCount >= 2)
+			{
+				if (!Probe()) { Test->AddError(TEXT("Could not probe rebuilt CustomOption legend override.")); State->Cleanup(); return true; }
+				Stage = 4; State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0; return false;
+			}
+			if (Stage == 4 && State->Sink->DataOptionReportCount >= 1)
+			{
+				Test->TestTrue(TEXT("CustomOption legend override survives Release/Rebuild"), State->Sink->bLastDataOptionSucceeded);
+				State->Cleanup(); return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds) { Test->AddError(FString::Printf(TEXT("Timed out in CustomOption legend stage %d."), Stage)); State->Cleanup(); return true; }
+			return false;
+		}
+	private:
+		TSharedRef<FDataBrowserState> State; FAutomationTestBase* Test; int32 Stage = 0;
 	};
 
 	class FStartCacheReplayCommand : public IAutomationLatentCommand
@@ -1023,6 +1079,17 @@ bool FEChartsCEFNative3DStateRegressionTest::RunTest(const FString& Parameters)
 	}
 	const TSharedRef<EChartsDataTests::FDataBrowserState> State = MakeShared<EChartsDataTests::FDataBrowserState>();
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FNative3DStateRegressionCommand(State, this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFCustomOptionLegendReplayTest,
+	"EChartsWidget.Integration.CEFCustomOptionLegendReplay", EChartsDataTests::Flags)
+bool FEChartsCEFCustomOptionLegendReplayTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI"))) { AddInfo(TEXT("Not executed under NullRHI: real CEF legend replay requires D3D12.")); return true; }
+	if (!FSlateApplication::IsInitialized()) { AddError(TEXT("Real CEF legend replay requires initialized Slate.")); return false; }
+	const TSharedRef<EChartsDataTests::FDataBrowserState> State = MakeShared<EChartsDataTests::FDataBrowserState>();
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FCustomOptionLegendReplayCommand(State, this));
 	return true;
 }
 

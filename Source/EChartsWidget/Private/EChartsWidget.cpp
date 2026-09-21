@@ -838,10 +838,10 @@ void UEChartsWidget::SetInteractionMode(const EEChartsInteractionMode Mode)
 void UEChartsWidget::SendLegendSettings()
 {
 	if (RuntimeState != EEChartsRuntimeState::Ready || PendingLegendRequestId != 0) return;
-	const FString Encoded = EncodeLegendSettings(LegendSettings);
+	const FString Encoded = EncodeLegendSettings(RequestedLegendSettings);
 	if (Encoded.IsEmpty()) return;
 	PendingLegendRequestId = AllocateAdvancedRequestId();
-	InFlightLegendSettings = LegendSettings;
+	InFlightLegendSettings = RequestedLegendSettings;
 	bLegendSettingsQueued = false;
 	bLegendReplayPending = true;
 	ExecuteJavascript(FEChartsWidgetJavascript::BuildSetLegendSettingsCommand(PendingLegendRequestId, Encoded));
@@ -850,11 +850,11 @@ void UEChartsWidget::SendLegendSettings()
 void UEChartsWidget::SetLegendSettings(const FEChartsLegendSettings& Settings)
 {
 	if (!IsGameThreadMutation()) return;
-	LegendSettings = ClampLegendSettings(Settings);
+	RequestedLegendSettings = ClampLegendSettings(Settings);
 	bLegendReplayPending = true;
 	if (RuntimeState == EEChartsRuntimeState::Ready)
 	{
-		if (PendingLegendRequestId != 0) bLegendSettingsQueued = InFlightLegendSettings != LegendSettings;
+		if (PendingLegendRequestId != 0) bLegendSettingsQueued = InFlightLegendSettings != RequestedLegendSettings;
 		else SendLegendSettings();
 	}
 }
@@ -1257,9 +1257,11 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			MessageGeneration == LoadGeneration && RequestId == PendingLegendRequestId && RuntimeState == EEChartsRuntimeState::Ready)
 		{
 			const FEChartsLegendSettings AppliedSettings = InFlightLegendSettings;
-			const bool bSendLatest = bLegendSettingsQueued || AppliedSettings != LegendSettings;
+			const bool bSendLatest = bLegendSettingsQueued || AppliedSettings != RequestedLegendSettings;
 			PendingLegendRequestId = 0;
 			bLegendSettingsQueued = false;
+			if (bSuccess) LegendSettings = AppliedSettings;
+			else if (!bSendLatest) RequestedLegendSettings = LegendSettings;
 			bLegendReplayPending = !bSuccess && !bSendLatest;
 			OnLegendSettingsApplied.Broadcast(bSuccess, Detail);
 			if (bSendLatest && PendingLegendRequestId == 0) SendLegendSettings();

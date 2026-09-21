@@ -175,7 +175,7 @@ On Chart Ready
 
 ### 5.4 图例设置
 
-`Set Legend Settings(Settings)` 与 `Reset Legend Settings()` 位于 `ECharts|Legend`。`FEChartsLegendSettings` 默认显示图例，位置/方向均为 Auto，字号 12、间距 10、图标 25×14、Custom X/Y 为 50%/5%；数值会按 Blueprint 元数据范围在 C++ 再次夹紧。Auto 在宽度 ≥720 CSS px 时顶部居中横排，窄窗口在右侧纵排；Top/Bottom/Left/Right/Custom 和 Horizontal/Vertical 可显式覆盖。设置会缓存，在 Loading、Release/Rebuild 后重放，不使用 Tick 或轮询。
+`Set Legend Settings(Settings)` 与 `Reset Legend Settings()` 位于 `ECharts|Legend`。`FEChartsLegendSettings` 默认显示图例，位置/方向均为 Auto，字号 12、间距 10、图标 25×14、Custom X/Y 为 50%/5%；数值会按 Blueprint 元数据范围在 C++ 再次夹紧。Auto 在宽度 ≥720 CSS px 时顶部居中横排，窄窗口在右侧纵排；Top/Bottom/Left/Right/Custom 和 Horizontal/Vertical 可显式覆盖。设置采用事务语义：Blueprint Read Only 状态只在 `On Legend Settings Applied` 成功 ACK 后更新，失败保留 last-good；最新候选会在 Loading 与 Release/Rebuild 后重放，不使用 Tick 或轮询。即使 CustomOption 自带 legend object/array，Blueprint Legend Settings 仍是最终覆盖层。
 
 无效索引、类型冲突、NaN/Infinity、空分类、总点数或 JSON 超限会返回 false/广播错误；批量 Set/Append 不会半写入。
 
@@ -214,6 +214,7 @@ Stream 状态：`Stopped / Preparing / Playing / Paused / Completed / Error`，�
 | `On ECharts Warning / Error` | `Message`；Error 也用于非终止数据校验，应查看 Runtime State。 |
 | `On ECharts Applied` | `Revision, Point Count`；浏览器 ACK。 |
 | `On Interaction Mode Applied` | `Mode, Success, Message`。 |
+| `On Legend Settings Applied` | `Success, Message`；成功才提交 Blueprint Read Only 设置。 |
 | `On Option Applied` | `Success, Message`。 |
 | `On JavaScript Result` | `Request Id, Success, Message`。 |
 | `On Data Table Load Progress` | `Processed, Total`。 |

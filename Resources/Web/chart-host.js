@@ -87,6 +87,7 @@
             !['numeric2D', 'category', 'data3D'].includes(series.type) || !Array.isArray(series.data)) {
           throw new Error('Invalid series payload at index ' + expectedIndex);
         }
+        if (series.data.length === 0) throw new Error('Data payload series ' + expectedIndex + ' must contain data');
         const width = series.type === 'numeric2D' ? 2 : (series.type === 'category' ? 2 : 5);
         series.data.forEach(function (point) {
           if (!Array.isArray(point) || point.length !== width) throw new Error('Invalid point width in series ' + expectedIndex);
@@ -172,12 +173,19 @@
     }
 
     function applyDataOption(option) {
-      if (!isNative3DOption(option)) {
+      const nativeGrid3D = !!(templateBaseOption && templateBaseOption.grid3D);
+      if (!nativeGrid3D) {
         chart.setOption(option, { notMerge: true, lazyUpdate: false });
         return;
       }
-      const patch = { series: clone(option.series), legend: clone(option.legend), visualMap: clone(option.visualMap) };
-      chart.setOption(patch, { notMerge: false, lazyUpdate: false, replaceMerge: ['series', 'visualMap'] });
+      const patch = {
+        series: clone(option.series || []), legend: clone(option.legend), visualMap: clone(option.visualMap || []),
+        xAxis: clone(option.xAxis || []), yAxis: clone(option.yAxis || []), grid: clone(option.grid || [])
+      };
+      chart.setOption(patch, {
+        notMerge: false, lazyUpdate: false,
+        replaceMerge: ['series', 'visualMap', 'xAxis', 'yAxis', 'grid']
+      });
     }
 
     function optionForPayload(payload) {
@@ -414,18 +422,64 @@
         }
       },
       setLegendSettingsBase64: function (requestId, base64) {
+        let chartSnapshot = null;
+        let optionSnapshot = null;
+        let templateSnapshot = null;
+        let settingsSnapshot = null;
+        let layoutSnapshot = '';
+        let chartMutationAttempted = false;
         try {
           if (!validRequestId(requestId)) throw new Error('Invalid legend request id');
           const settings = normalizeLegendSettings(JSON.parse(decodeBase64Text(base64, 64 * 1024, 'legend settings')));
           if (!currentOption) throw new Error('Chart option is not ready');
+          const optionCandidate = clone(currentOption);
+          const templateCandidate = clone(templateBaseOption);
+          const layoutCandidate = applyLegendSettings(optionCandidate, settings);
+          if (templateCandidate) applyLegendSettings(templateCandidate, settings);
+          chartSnapshot = clone(chart.getOption());
+          optionSnapshot = clone(currentOption);
+          templateSnapshot = clone(templateBaseOption);
+          settingsSnapshot = clone(currentLegendSettings);
+          layoutSnapshot = lastResponsiveLegendLayout;
+          chartMutationAttempted = true;
+          chart.setOption({ legend: clone(optionCandidate.legend) }, { notMerge: false, lazyUpdate: false });
           currentLegendSettings = settings;
-          lastResponsiveLegendLayout = applyLegendSettings(currentOption, currentLegendSettings);
-          if (templateBaseOption) applyLegendSettings(templateBaseOption, currentLegendSettings);
-          chart.setOption({ legend: clone(currentOption.legend) }, { notMerge: false, lazyUpdate: false });
+          currentOption = optionCandidate;
+          templateBaseOption = templateCandidate;
+          lastResponsiveLegendLayout = layoutCandidate;
           emitResult('LEGEND_RESULT', requestId, true, 'Legend settings applied');
           return true;
         } catch (error) {
-          const detail = error && error.message ? error.message : String(error);
+          let detail = error && error.message ? error.message : String(error);
+          if (chartMutationAttempted) {
+            try {
+              chart.clear();
+              chart.setOption(chartSnapshot, { notMerge: true, lazyUpdate: false });
+              currentOption = optionSnapshot;
+              templateBaseOption = templateSnapshot;
+              currentLegendSettings = settingsSnapshot;
+              lastResponsiveLegendLayout = layoutSnapshot;
+            } catch (rollbackError) {
+              const damagedChart = chart;
+              try { chart.dispose(); } catch (_) {}
+              try { if (typeof window.echarts.dispose === 'function') window.echarts.dispose(chartElement); } catch (_) {}
+              try {
+                chart = window.echarts.init(chartElement, null, { renderer: 'canvas' });
+                if (chart === damagedChart) throw new Error('ECharts returned the damaged chart instance');
+                chart.setOption(chartSnapshot, { notMerge: true, lazyUpdate: false });
+                currentOption = optionSnapshot;
+                templateBaseOption = templateSnapshot;
+                currentLegendSettings = settingsSnapshot;
+                lastResponsiveLegendLayout = layoutSnapshot;
+              } catch (recoveryError) {
+                const recoveryDetail = recoveryError && recoveryError.message ? recoveryError.message : String(recoveryError);
+                detail += '; rollback failed: ' + recoveryDetail;
+                emitResult('LEGEND_RESULT', requestId, false, detail);
+                emit('ERROR', 'legend rollback failed: ' + recoveryDetail.replace(/[\r\n]+/g, ' | '));
+                return false;
+              }
+            }
+          }
           emitResult('LEGEND_RESULT', requestId, false, detail);
           return false;
         }
@@ -445,6 +499,7 @@
             throw new Error('ECharts option JSON must be an object');
           }
           const option = window.UEEChartsTemplates.applyInteractionMode(optionValue, currentInteractionMode);
+          const legendLayoutCandidate = applyLegendSettings(option, currentLegendSettings);
           chartSnapshot = clone(chart.getOption());
           optionSnapshot = clone(currentOption);
           templateSnapshot = clone(templateBaseOption);
@@ -457,6 +512,7 @@
           templateBaseOption = clone(option);
           currentOption = option;
           currentPayload = null;
+          lastResponsiveLegendLayout = legendLayoutCandidate;
           emitResult('OPTION_RESULT', requestId, true, 'CustomOption applied');
           return true;
         } catch (error) {
@@ -567,10 +623,18 @@
       getOptionForTesting: function () {
         return chart.getOption();
       },
-      setViewControlForTesting: function (alpha, beta, distance) {
-        if (![alpha, beta, distance].every(Number.isFinite)) return false;
-        chart.setOption({ grid3D: { viewControl: { alpha, beta, distance } } }, { notMerge: false, lazyUpdate: false });
-        return true;
+      getRuntimeViewControlForTesting: function () {
+        const model = chart.getModel().getComponent('grid3D', 0);
+        const view = model && chart.getViewOfComponentModel(model);
+        const control = view && view._control;
+        if (!control || typeof control.getAlpha !== 'function' || typeof control.getBeta !== 'function' ||
+            typeof control.getDistance !== 'function' || typeof control.getCenter !== 'function') return null;
+        return { alpha: control.getAlpha(), beta: control.getBeta(), distance: control.getDistance(), center: Array.from(control.getCenter()) };
+      },
+      dispatchViewControlForTesting: function (alpha, beta, distance, center) {
+        if (![alpha, beta, distance].every(Number.isFinite) || !Array.isArray(center) || center.length !== 3 || !center.every(Number.isFinite)) return null;
+        chart.dispatchAction({ type: 'grid3DChangeCamera', alpha, beta, distance, center: center.slice(), grid3DIndex: 0 });
+        return hostApi.getRuntimeViewControlForTesting();
       },
       getGraphicShapeStatsForTesting: function () {
         const displayList = chart.getZr().storage.getDisplayList(true);

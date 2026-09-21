@@ -110,7 +110,8 @@ public:
 		if (Message.StartsWith(DataOptionMarker))
 		{
 			++DataOptionReportCount;
-			bLastDataOptionSucceeded = Message.RightChop(DataOptionMarker.Len()) == TEXT("OK");
+			LastAdvancedProbe = Message.RightChop(DataOptionMarker.Len());
+			bLastDataOptionSucceeded = LastAdvancedProbe == TEXT("OK");
 			return;
 		}
 
@@ -205,6 +206,12 @@ public:
 		++LegendResultCount;
 		bLastLegendSuccess = bSuccess;
 		LastAdvancedMessage = Message;
+		if (!bSuccess && LegendFailureInitializeWidget.IsValid())
+		{
+			UEChartsWidget* Widget = LegendFailureInitializeWidget.Get();
+			LegendFailureInitializeWidget.Reset();
+			Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
+		}
 	}
 
 	UFUNCTION()
@@ -235,6 +242,7 @@ public:
 	EEChartsInteractionMode LastInteractionMode = EEChartsInteractionMode::ClickOnly;
 	FString LastAdvancedMessage;
 	TWeakObjectPtr<UEChartsWidget> OptionFailureInitializeWidget;
+	TWeakObjectPtr<UEChartsWidget> LegendFailureInitializeWidget;
 	EEChartsTemplate OptionFailureInitializeTemplate = EEChartsTemplate::Bar3DHeightMap;
 	TWeakObjectPtr<UEChartsWidget> ErrorInitializeWidget;
 	int32 DataOptionReportCount = 0;

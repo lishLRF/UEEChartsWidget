@@ -83,7 +83,7 @@ Set Auto Apply Enabled(Enabled, Max Updates Per Second=10.0) -> void
 
 ### Legend settings
 
-`Set Legend Settings(Settings)` and `Reset Legend Settings()` are under `ECharts|Legend`. `FEChartsLegendSettings` defaults to visible, Auto position/orientation, font size 12, gap 10, icon 25×14, and Custom X/Y 50%/5%. C++ clamps these values again. Auto uses a centered horizontal top legend at widths ≥720 CSS px and a vertical right legend below that threshold. Top/Bottom/Left/Right/Custom and Horizontal/Vertical provide explicit overrides. Settings are cached during Loading and replayed after Release/Rebuild without Tick or polling.
+`Set Legend Settings(Settings)` and `Reset Legend Settings()` are under `ECharts|Legend`. `FEChartsLegendSettings` defaults to visible, Auto position/orientation, font size 12, gap 10, icon 25×14, and Custom X/Y 50%/5%. C++ clamps these values again. Auto uses a centered horizontal top legend at widths ≥720 CSS px and a vertical right legend below that threshold. Top/Bottom/Left/Right/Custom and Horizontal/Vertical provide explicit overrides. Settings are transactional: Blueprint Read Only state changes only after a successful `On Legend Settings Applied` ACK; failure preserves last-good settings. The latest requested candidate is cached during Loading and replayed after Release/Rebuild without Tick or polling. Blueprint legend settings remain the final override even when CustomOption supplies its own legend object or array.
 
 There is no history database, playback cache, or `Set History Capacity` API. The Time Series window is only the current in-memory visible ring.
 
@@ -107,6 +107,7 @@ Important events:
 
 - `On ECharts Applied(Revision, Point Count)`
 - `On Interaction Mode Applied(Mode, Success, Message)`
+- `On Legend Settings Applied(Success, Message)`
 - `On Option Applied(Success, Message)`
 - `On JavaScript Result(Request Id, Success, Message)`
 - `On Data Table Load Progress`, `On Data Table Loaded`, `On Data Table Load Cancelled`
