@@ -529,6 +529,12 @@ test('3D data maps by the current effective template including WebGL fallbacks',
       assert.equal(JSON.stringify(appliedOption.series[0].ueOriginalData), JSON.stringify([[1, 2, 3, 4, 5]]));
       assert.equal(JSON.stringify(appliedOption.xAxis.data), JSON.stringify([1]));
       assert.equal(JSON.stringify(appliedOption.yAxis.data), JSON.stringify([2]));
+      assert.equal(appliedOption.visualMap.dimension, 2);
+      assert.deepEqual([appliedOption.visualMap.min, appliedOption.visualMap.max], [0, 3]);
+    }
+    if (item.effective === 'DataTableScatter2D') {
+      assert.equal(appliedOption.visualMap.dimension, 3);
+      assert.deepEqual([appliedOption.visualMap.min, appliedOption.visualMap.max], [0, 4]);
     }
     if (!item.hasGrid3D) assert.doesNotMatch(appliedOption.series[0].type, /3D$/);
   }
@@ -657,7 +663,11 @@ test('native Bar3D data uses value axes for arbitrary XYZ coordinates', () => {
   state.window.UEEChartsTemplates = templates;
   state.window.echarts.init = () => ({
     clear() {}, resize() {}, dispose() {},
-    setOption(option) { appliedOption = option; },
+    setOption(option, settings) {
+      appliedOption = settings && settings.notMerge === false
+        ? Object.assign({}, appliedOption || {}, option)
+        : option;
+    },
     getOption() { return appliedOption || { series: [] }; },
   });
   vm.runInContext(hostSource, state.context);
@@ -673,4 +683,81 @@ test('native Bar3D data uses value axes for arbitrary XYZ coordinates', () => {
   assert.equal(appliedOption.xAxis3D.type, 'value');
   assert.equal(appliedOption.yAxis3D.type, 'value');
   assert.equal(appliedOption.zAxis3D.type, 'value');
+});
+
+test('native 3D keeps only active series legend and removes 2D coordinate components', () => {
+  const state = createHostContext();
+  state.window.location.search = '?generation=7&forceWebGL=1';
+  let appliedOption = null;
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() {}, resize() {}, dispose() {}, setOption(option) { appliedOption = option; }, getOption() { return appliedOption || {}; } });
+  vm.runInContext(hostSource, state.context);
+  assert.equal(state.window.UEEChartsHost.renderTemplate('Bar3DHeightMap', {}, 'ClickOnly'), 'Bar3DHeightMap');
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload({ revision: 1, template: 'Bar3DHeightMap', xAxisMode: 'ShowAll', series: [{ index: 0, name: 'Only 3D', type: 'data3D', data: [[1, 2, 3, 10, 12]] }] })), true);
+  assert.equal(appliedOption.series.length, 1);
+  assert.deepEqual(Array.from(appliedOption.legend.data), ['Only 3D']);
+  assert.equal(Object.hasOwn(appliedOption, 'xAxis'), false);
+  assert.equal(Object.hasOwn(appliedOption, 'yAxis'), false);
+  assert.equal(Object.hasOwn(appliedOption, 'grid'), false);
+});
+
+test('native 3D visualMap uses ColorValue across all 3D series and exposes five tooltip dimensions', () => {
+  const state = createHostContext();
+  state.window.location.search = '?generation=7&forceWebGL=1';
+  let appliedOption = null;
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() {}, resize() {}, dispose() {}, setOption(option) { appliedOption = option; }, getOption() { return appliedOption || {}; } });
+  vm.runInContext(hostSource, state.context);
+  state.window.UEEChartsHost.renderTemplate('DataTableScatter3D', {}, 'ClickOnly');
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload({ revision: 2, template: 'DataTableScatter3D', xAxisMode: 'ShowAll', series: [{ index: 0, name: 'A', type: 'data3D', data: [[1, 2, 999, 10, 11]] }, { index: 1, name: 'B', type: 'data3D', data: [[2, 3, -999, 100, 12]] }] })), true);
+  assert.equal(appliedOption.visualMap.dimension, 3);
+  assert.deepEqual(Array.from(appliedOption.visualMap.seriesIndex), [0, 1]);
+  assert.equal(appliedOption.visualMap.min, 10);
+  assert.equal(appliedOption.visualMap.max, 100);
+  assert.deepEqual(Array.from(appliedOption.series[0].encode.tooltip), [0, 1, 2, 3, 4]);
+  assert.equal(appliedOption.series[1].data[0][3], 100);
+});
+
+test('native 3D single ColorValue gets a non-zero range including zero', () => {
+  for (const [value, expected] of [[100, [0, 100]], [-5, [-5, 0]], [0, [0, 1]]]) {
+    const state = createHostContext(); let appliedOption = null;
+    state.window.location.search = '?generation=7&forceWebGL=1';
+    state.window.UEEChartsTemplates = Object.assign({}, templates);
+    state.window.echarts.init = () => ({ clear() {}, resize() {}, dispose() {}, setOption(option) { appliedOption = option; }, getOption() { return appliedOption || {}; } });
+    vm.runInContext(hostSource, state.context); state.window.UEEChartsHost.renderTemplate('Bar3DHeightMap', {}, 'ClickOnly');
+    state.window.UEEChartsHost.applyDataBase64(encodePayload({ revision: 1, template: 'Bar3DHeightMap', xAxisMode: 'ShowAll', series: [{ index: 0, name: 'S', type: 'data3D', data: [[1, 2, 3, value, 9]] }] }));
+    assert.deepEqual([appliedOption.visualMap.min, appliedOption.visualMap.max], expected);
+  }
+});
+
+test('native 3D data updates merge series without submitting grid3D and preserve camera state', () => {
+  const state = createHostContext(); const calls = []; let visibleOption = {};
+  state.window.location.search = '?generation=7&forceWebGL=1';
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() {}, resize() {}, dispose() {}, setOption(option, settings) { calls.push({ option, settings }); if (settings && settings.notMerge === true) visibleOption = JSON.parse(JSON.stringify(option)); else visibleOption = Object.assign({}, visibleOption, JSON.parse(JSON.stringify(option))); }, getOption() { return visibleOption; } });
+  vm.runInContext(hostSource, state.context); state.window.UEEChartsHost.renderTemplate('Bar3DHeightMap', {}, 'ClickOnly');
+  visibleOption.grid3D.viewControl.cameraToken = 'user-camera';
+  state.window.UEEChartsHost.applyDataBase64(encodePayload({ revision: 1, template: 'Bar3DHeightMap', xAxisMode: 'ShowAll', series: [{ index: 0, name: 'S', type: 'data3D', data: [[1, 2, 3, 4, 5]] }] }));
+  const update = calls.at(-1);
+  assert.equal(update.settings.notMerge, false);
+  assert.deepEqual(Array.from(update.settings.replaceMerge), ['series', 'visualMap']);
+  assert.equal(Object.hasOwn(update.option, 'grid3D'), false);
+  assert.equal(visibleOption.grid3D.viewControl.cameraToken, 'user-camera');
+});
+
+test('legend settings are responsive, manually overridable, clamped, and do not reset 3D camera', () => {
+  const state = createHostContext(); state.chartElement.clientWidth = 1000; let visibleOption = {}; const calls = [];
+  state.window.location.search = '?generation=7&forceWebGL=1';
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() {}, resize() {}, dispose() {}, getWidth() { return state.chartElement.clientWidth; }, getHeight() { return 600; }, setOption(option, settings) { calls.push({ option, settings }); visibleOption = Object.assign({}, visibleOption, JSON.parse(JSON.stringify(option))); }, getOption() { return visibleOption; } });
+  vm.runInContext(hostSource, state.context); state.window.UEEChartsHost.renderTemplate('Bar3DHeightMap', {}, 'ClickOnly'); visibleOption.grid3D.viewControl.cameraToken = 'keep';
+  assert.equal(state.window.UEEChartsHost.setLegendSettingsBase64(77, encodePayload({ bShow: true, position: 'Auto', orientation: 'Auto', fontSize: 999, itemGap: -1, itemWidth: 0, itemHeight: 999, customXPercent: 150, customYPercent: -20 })), true);
+  let legend = visibleOption.legend;
+  assert.equal(legend.top, '5%'); assert.equal(legend.left, 'center'); assert.equal(legend.orient, 'horizontal'); assert.equal(legend.textStyle.fontSize, 72); assert.equal(legend.itemGap, 0); assert.equal(legend.itemWidth, 1); assert.equal(legend.itemHeight, 100);
+  assert.equal(calls.at(-1).settings.notMerge, false); assert.equal(Object.hasOwn(calls.at(-1).option, 'grid3D'), false); assert.equal(visibleOption.grid3D.viewControl.cameraToken, 'keep');
+  state.chartElement.clientWidth = 600; state.observers[0].callback(); legend = visibleOption.legend;
+  assert.equal(legend.right, '2%'); assert.equal(legend.top, 'middle'); assert.equal(legend.orient, 'vertical');
+  assert.ok(state.logs.includes('__UE_ECHARTS_LEGEND_RESULT__:7:77:1:Legend settings applied'));
+  assert.equal(state.window.UEEChartsHost.setLegendSettingsBase64(78, '%%%'), false);
+  assert.ok(state.logs.some(line => line.startsWith('__UE_ECHARTS_LEGEND_RESULT__:7:78:0:')));
 });

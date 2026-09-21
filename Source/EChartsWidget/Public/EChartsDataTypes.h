@@ -65,6 +65,49 @@ enum class EEChartsXAxisMode : uint8
 	Category
 };
 
+UENUM(BlueprintType)
+enum class EEChartsLegendPosition : uint8
+{
+	Auto,
+	Top,
+	Bottom,
+	Left,
+	Right,
+	Custom
+};
+
+UENUM(BlueprintType)
+enum class EEChartsLegendOrientation : uint8
+{
+	Auto,
+	Horizontal,
+	Vertical
+};
+
+USTRUCT(BlueprintType)
+struct ECHARTSWIDGET_API FEChartsLegendSettings
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend") bool bShow = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend") EEChartsLegendPosition Position = EEChartsLegendPosition::Auto;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend") EEChartsLegendOrientation Orientation = EEChartsLegendOrientation::Auto;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend", meta = (ClampMin = "6", ClampMax = "72")) int32 FontSize = 12;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend", meta = (ClampMin = "0", ClampMax = "100")) int32 ItemGap = 10;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend", meta = (ClampMin = "1", ClampMax = "100")) int32 ItemWidth = 25;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend", meta = (ClampMin = "1", ClampMax = "100")) int32 ItemHeight = 14;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend", meta = (ClampMin = "0.0", ClampMax = "100.0")) float CustomXPercent = 50.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Legend", meta = (ClampMin = "0.0", ClampMax = "100.0")) float CustomYPercent = 5.0f;
+
+	bool operator==(const FEChartsLegendSettings& Other) const
+	{
+		return bShow == Other.bShow && Position == Other.Position && Orientation == Other.Orientation &&
+			FontSize == Other.FontSize && ItemGap == Other.ItemGap && ItemWidth == Other.ItemWidth &&
+			ItemHeight == Other.ItemHeight && CustomXPercent == Other.CustomXPercent && CustomYPercent == Other.CustomYPercent;
+	}
+	bool operator!=(const FEChartsLegendSettings& Other) const { return !(*this == Other); }
+};
+
 enum class EEChartsSeriesDataType : uint8
 {
 	Unset,

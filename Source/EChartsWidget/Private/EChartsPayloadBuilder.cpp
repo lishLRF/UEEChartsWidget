@@ -148,6 +148,7 @@ namespace
 		int64 EstimatedJsonBytes = 1024;
 		for (const FEChartsSeriesData& Item : Series)
 		{
+			if (Item.Num() <= 0) continue;
 			if (!TryAccumulateJsonStringBytes(Item.Name, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes) ||
 				!TryAddBytes(128, FEChartsPayloadBuilder::MaxJsonBytes, EstimatedJsonBytes))
 			{
@@ -249,11 +250,13 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 
 	TArray<TSharedPtr<FJsonValue>> JsonSeries;
 	JsonSeries.Reserve(MaxSeriesCount);
+	int32 CompactSeriesIndex = 0;
 	for (int32 SeriesIndex = 0; SeriesIndex < MaxSeriesCount; ++SeriesIndex)
 	{
 		const FEChartsSeriesData& Item = Series[SeriesIndex];
+		if (Item.Num() <= 0) continue;
 		TSharedRef<FJsonObject> JsonItem = MakeShared<FJsonObject>();
-		JsonItem->SetNumberField(TEXT("index"), SeriesIndex);
+		JsonItem->SetNumberField(TEXT("index"), CompactSeriesIndex++);
 		JsonItem->SetStringField(TEXT("name"), Item.Name);
 		JsonItem->SetStringField(TEXT("type"), SeriesTypeName(Item.Type));
 

@@ -29,12 +29,15 @@ In a Widget Blueprint:
 
    ```text
    Set Series Name(0, "Temperature")
+   Set Legend Settings(Position=Auto, Orientation=Auto, FontSize=12)
    Add Data Point(0, 0.0, 21.5)
    Add Data Point(0, 1.0, 22.1)
    Apply ECharts Changes
    ```
 
 Mutations update the UE-side cache. Submit with `Apply ECharts Changes`, or use `Set Auto Apply Enabled(true, Hz)`. Auto Apply is clamped to **1–30 Hz** (10 Hz default), coalesces dirty state, and waits for the prior browser ACK.
+
+Legend entries are not entered manually: their count always matches non-empty data series, and `Set Series Name` changes each entry's label. Use `Set Legend Settings` to override visibility, position, orientation, spacing, font size, and icon size; `Reset Legend Settings` restores responsive defaults.
 
 ## Templates and fallback
 
@@ -76,7 +79,11 @@ Apply ECharts Changes() -> void
 Set Auto Apply Enabled(Enabled, Max Updates Per Second=10.0) -> void
 ```
 
-`FEChartsDataPoint3D` contains `X, Y, Z, ColorValue, SymbolSizeValue`. Ordinary category Apply creates a union label domain; duplicate X values in one series use the last value. Category streaming preserves repeated labels in append order.
+`FEChartsDataPoint3D` contains `X, Y, Z, ColorValue, SymbolSizeValue`. Native Bar3D/Scatter3D derives the visualMap range from `ColorValue`; Scatter3D uses `SymbolSizeValue`. A native-only 3D option has no 2D `xAxis`, `yAxis`, or `grid`. The Bar3D heatmap fallback colors by Z, while Scatter2D colors by `ColorValue`. Data and Auto Apply merge series/legend/visualMap without rebuilding `grid3D`, preserving the user's camera. Ordinary category Apply creates a union label domain; duplicate X values in one series use the last value. Category streaming preserves repeated labels in append order.
+
+### Legend settings
+
+`Set Legend Settings(Settings)` and `Reset Legend Settings()` are under `ECharts|Legend`. `FEChartsLegendSettings` defaults to visible, Auto position/orientation, font size 12, gap 10, icon 25×14, and Custom X/Y 50%/5%. C++ clamps these values again. Auto uses a centered horizontal top legend at widths ≥720 CSS px and a vertical right legend below that threshold. Top/Bottom/Left/Right/Custom and Horizontal/Vertical provide explicit overrides. Settings are cached during Loading and replayed after Release/Rebuild without Tick or polling.
 
 There is no history database, playback cache, or `Set History Capacity` API. The Time Series window is only the current in-memory visible ring.
 

@@ -48,6 +48,7 @@ public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEChartsError, const FString&, Message);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEChartsApplied, int64, Revision, int32, PointCount);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInteractionModeApplied, EEChartsInteractionMode, Mode, bool, bSuccess, const FString&, Message);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLegendSettingsApplied, bool, bSuccess, const FString&, Message);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnOptionApplied, bool, bSuccess, const FString&, Message);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnJavaScriptResult, int64, RequestId, bool, bSuccess, const FString&, Message);
 
@@ -117,6 +118,13 @@ public:
 	/** Changes ECharts interaction behavior immediately when Ready, or caches it for the next Ready generation. */
 	UFUNCTION(BlueprintCallable, Category = "ECharts|Advanced", meta = (DisplayName = "Set Interaction Mode"))
 	void SetInteractionMode(EEChartsInteractionMode Mode);
+
+	/** Validates, caches, and applies legend presentation without changing chart data or a 3D camera. */
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Legend", meta = (DisplayName = "Set Legend Settings"))
+	void SetLegendSettings(const FEChartsLegendSettings& Settings);
+
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Legend", meta = (DisplayName = "Reset Legend Settings"))
+	void ResetLegendSettings();
 
 	/**
 	 * Validates and caches an ECharts option object encoded as JSON, then selects CustomOption.
@@ -188,6 +196,9 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	EEChartsInteractionMode InteractionMode = EEChartsInteractionMode::ClickOnly;
 
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Legend")
+	FEChartsLegendSettings LegendSettings;
+
 	/** Current generation state. Error remains terminal until InitializeECharts or Slate rebuild starts a new generation. */
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts")
 	EEChartsRuntimeState RuntimeState = EEChartsRuntimeState::Uninitialized;
@@ -245,6 +256,9 @@ public:
 	FOnInteractionModeApplied OnInteractionModeApplied;
 
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
+	FOnLegendSettingsApplied OnLegendSettingsApplied;
+
+	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
 	FOnOptionApplied OnOptionApplied;
 
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
@@ -292,10 +306,11 @@ public:
 	const FString& GetInFlightOptionBase64ForTesting() const { return InFlightOptionBase64; }
 	int32 GetPendingAdvancedRequestCountForTesting() const
 	{
-		return PendingJavaScriptRequests.Num() + (PendingOptionRequestId > 0 ? 1 : 0) + (PendingInteractionRequestId > 0 ? 1 : 0);
+		return PendingJavaScriptRequests.Num() + (PendingOptionRequestId > 0 ? 1 : 0) + (PendingInteractionRequestId > 0 ? 1 : 0) + (PendingLegendRequestId > 0 ? 1 : 0);
 	}
 	int64 GetPendingOptionRequestIdForTesting() const { return static_cast<int64>(PendingOptionRequestId); }
 	int64 GetPendingInteractionRequestIdForTesting() const { return static_cast<int64>(PendingInteractionRequestId); }
+	int64 GetPendingLegendRequestIdForTesting() const { return static_cast<int64>(PendingLegendRequestId); }
 	bool IsPayloadBuildInFlightForTesting() const { return bPayloadBuildInFlight; }
 	int32 GetPayloadBuildCountForTesting() const { return PayloadBuildCountForTesting; }
 	bool DidPayloadBuilderRunOnGameThreadForTesting() const { return PayloadBuildThreadFlagForTesting.IsValid() && *PayloadBuildThreadFlagForTesting; }
@@ -334,6 +349,7 @@ private:
 	void BeginOptionBarrier();
 	void ResolveOptionBarrier(bool bCommit);
 	void SendInteractionMode();
+	void SendLegendSettings();
 	void ClearPendingAdvancedRequests(bool bPreserveOptionCandidate);
 	int32 GetTotalPointCount() const;
 	void StopDataTableLoad(bool bNotify);
@@ -410,12 +426,16 @@ private:
 	uint64 NextAdvancedRequestId = 0;
 	uint64 PendingOptionRequestId = 0;
 	uint64 PendingInteractionRequestId = 0;
+	uint64 PendingLegendRequestId = 0;
 	TSet<uint64> PendingJavaScriptRequests;
 	bool bInFlightOptionIsCandidate = false;
 	EEChartsInteractionMode InFlightInteractionMode = EEChartsInteractionMode::ClickOnly;
+	FEChartsLegendSettings InFlightLegendSettings;
 	bool bInteractionModeQueued = false;
+	bool bLegendSettingsQueued = false;
 	bool bOptionReplayPending = false;
 	bool bInteractionReplayPending = false;
+	bool bLegendReplayPending = true;
 	bool bOptionBarrierActive = false;
 	bool bOptionBarrierChainCommitted = false;
 	bool bReplayBeforePendingCandidate = false;
@@ -453,6 +473,7 @@ public:
 	static FString BuildApplyStreamDeltaCommand(const FString& PayloadBase64);
 	static FString BuildApplyOptionCommand(uint64 RequestId, const FString& PayloadBase64);
 	static FString BuildSetInteractionModeCommand(uint64 RequestId, EEChartsInteractionMode InteractionMode);
+	static FString BuildSetLegendSettingsCommand(uint64 RequestId, const FString& PayloadBase64);
 	static FString BuildExecuteJavaScriptCommand(uint64 RequestId, const FString& PayloadBase64);
 };
 

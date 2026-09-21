@@ -30,6 +30,7 @@ namespace
 	const FString ErrorMarker = TEXT("__UE_ECHARTS_ERROR__:");
 	const FString OptionResultMarker = TEXT("__UE_ECHARTS_OPTION_RESULT__:");
 	const FString InteractionResultMarker = TEXT("__UE_ECHARTS_INTERACTION_RESULT__:");
+	const FString LegendResultMarker = TEXT("__UE_ECHARTS_LEGEND_RESULT__:");
 	const FString JavaScriptResultMarker = TEXT("__UE_ECHARTS_JAVASCRIPT_RESULT__:");
 	constexpr int32 MaxOptionJsonBytes = 16 * 1024 * 1024;
 	constexpr int32 MaxJavaScriptBytes = 1024 * 1024;
@@ -122,6 +123,60 @@ namespace
 		}
 
 		return Encoded;
+	}
+
+	const TCHAR* LegendPositionName(const EEChartsLegendPosition Position)
+	{
+		switch (Position)
+		{
+		case EEChartsLegendPosition::Top: return TEXT("Top");
+		case EEChartsLegendPosition::Bottom: return TEXT("Bottom");
+		case EEChartsLegendPosition::Left: return TEXT("Left");
+		case EEChartsLegendPosition::Right: return TEXT("Right");
+		case EEChartsLegendPosition::Custom: return TEXT("Custom");
+		default: return TEXT("Auto");
+		}
+	}
+
+	const TCHAR* LegendOrientationName(const EEChartsLegendOrientation Orientation)
+	{
+		switch (Orientation)
+		{
+		case EEChartsLegendOrientation::Horizontal: return TEXT("Horizontal");
+		case EEChartsLegendOrientation::Vertical: return TEXT("Vertical");
+		default: return TEXT("Auto");
+		}
+	}
+
+	FEChartsLegendSettings ClampLegendSettings(const FEChartsLegendSettings& Input)
+	{
+		FEChartsLegendSettings Result = Input;
+		Result.FontSize = FMath::Clamp(Result.FontSize, 6, 72);
+		Result.ItemGap = FMath::Clamp(Result.ItemGap, 0, 100);
+		Result.ItemWidth = FMath::Clamp(Result.ItemWidth, 1, 100);
+		Result.ItemHeight = FMath::Clamp(Result.ItemHeight, 1, 100);
+		Result.CustomXPercent = FMath::Clamp(Result.CustomXPercent, 0.0f, 100.0f);
+		Result.CustomYPercent = FMath::Clamp(Result.CustomYPercent, 0.0f, 100.0f);
+		return Result;
+	}
+
+	FString EncodeLegendSettings(const FEChartsLegendSettings& Settings)
+	{
+		TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetBoolField(TEXT("bShow"), Settings.bShow);
+		Json->SetStringField(TEXT("position"), LegendPositionName(Settings.Position));
+		Json->SetStringField(TEXT("orientation"), LegendOrientationName(Settings.Orientation));
+		Json->SetNumberField(TEXT("fontSize"), Settings.FontSize);
+		Json->SetNumberField(TEXT("itemGap"), Settings.ItemGap);
+		Json->SetNumberField(TEXT("itemWidth"), Settings.ItemWidth);
+		Json->SetNumberField(TEXT("itemHeight"), Settings.ItemHeight);
+		Json->SetNumberField(TEXT("customXPercent"), Settings.CustomXPercent);
+		Json->SetNumberField(TEXT("customYPercent"), Settings.CustomYPercent);
+		FString Text;
+		const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
+		if (!FJsonSerializer::Serialize(Json, Writer)) return FString();
+		const FTCHARToUTF8 Utf8(*Text);
+		return FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
 	}
 }
 
@@ -664,7 +719,9 @@ void UEChartsWidget::ClearPendingAdvancedRequests(const bool bPreserveOptionCand
 	bReplayBeforePendingCandidate = false;
 	PendingOptionRequestId = 0;
 	PendingInteractionRequestId = 0;
+	PendingLegendRequestId = 0;
 	bInteractionModeQueued = false;
+	bLegendSettingsQueued = false;
 	PendingJavaScriptRequests.Reset();
 }
 
@@ -778,6 +835,35 @@ void UEChartsWidget::SetInteractionMode(const EEChartsInteractionMode Mode)
 	}
 }
 
+void UEChartsWidget::SendLegendSettings()
+{
+	if (RuntimeState != EEChartsRuntimeState::Ready || PendingLegendRequestId != 0) return;
+	const FString Encoded = EncodeLegendSettings(LegendSettings);
+	if (Encoded.IsEmpty()) return;
+	PendingLegendRequestId = AllocateAdvancedRequestId();
+	InFlightLegendSettings = LegendSettings;
+	bLegendSettingsQueued = false;
+	bLegendReplayPending = true;
+	ExecuteJavascript(FEChartsWidgetJavascript::BuildSetLegendSettingsCommand(PendingLegendRequestId, Encoded));
+}
+
+void UEChartsWidget::SetLegendSettings(const FEChartsLegendSettings& Settings)
+{
+	if (!IsGameThreadMutation()) return;
+	LegendSettings = ClampLegendSettings(Settings);
+	bLegendReplayPending = true;
+	if (RuntimeState == EEChartsRuntimeState::Ready)
+	{
+		if (PendingLegendRequestId != 0) bLegendSettingsQueued = InFlightLegendSettings != LegendSettings;
+		else SendLegendSettings();
+	}
+}
+
+void UEChartsWidget::ResetLegendSettings()
+{
+	SetLegendSettings(FEChartsLegendSettings{});
+}
+
 bool UEChartsWidget::SetEChartsOptionJSON(const FString& OptionJson)
 {
 	if (!IsGameThreadMutation() || OptionJson.TrimStartAndEnd().IsEmpty()) return false;
@@ -837,6 +923,7 @@ void UEChartsWidget::InitializeECharts(
 	CurrentTemplate = Template;
 	InteractionMode = InInteractionMode;
 	bInteractionReplayPending = true;
+	bLegendReplayPending = true;
 	bOptionReplayPending = Template == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	bHasInitialized = true;
 	bReloadOnRebuild = false;
@@ -853,6 +940,7 @@ void UEChartsWidget::BeginLoadGeneration()
 		bReplayBeforePendingCandidate = true;
 	}
 	bInteractionReplayPending = true;
+	bLegendReplayPending = true;
 	bOptionReplayPending = CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (IsStreamingActive()) InvalidateStreamDelta();
 	if (InFlightRevision != 0)
@@ -909,6 +997,7 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 		bReplayBeforePendingCandidate = true;
 	}
 	bInteractionReplayPending = bHasInitialized;
+	bLegendReplayPending = bHasInitialized;
 	bOptionReplayPending = bHasInitialized && CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (InFlightRevision != 0)
 	{
@@ -981,6 +1070,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 				PayloadJson));
 			SendPendingOrCachedOption();
 			if (bInteractionReplayPending) SendInteractionMode();
+			if (bLegendReplayPending) SendLegendSettings();
 			OnChartReady.Broadcast();
 			if (bApplyRequested)
 			{
@@ -1157,6 +1247,26 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		return;
 	}
 
+	if (Message.StartsWith(LegendResultMarker))
+	{
+		uint64 MessageGeneration = 0;
+		uint64 RequestId = 0;
+		bool bSuccess = false;
+		FString Detail;
+		if (TryParseAdvancedResult(Message.RightChop(LegendResultMarker.Len()), MessageGeneration, RequestId, bSuccess, Detail) &&
+			MessageGeneration == LoadGeneration && RequestId == PendingLegendRequestId && RuntimeState == EEChartsRuntimeState::Ready)
+		{
+			const FEChartsLegendSettings AppliedSettings = InFlightLegendSettings;
+			const bool bSendLatest = bLegendSettingsQueued || AppliedSettings != LegendSettings;
+			PendingLegendRequestId = 0;
+			bLegendSettingsQueued = false;
+			bLegendReplayPending = !bSuccess && !bSendLatest;
+			OnLegendSettingsApplied.Broadcast(bSuccess, Detail);
+			if (bSendLatest && PendingLegendRequestId == 0) SendLegendSettings();
+		}
+		return;
+	}
+
 	if (Message.StartsWith(JavaScriptResultMarker))
 	{
 		uint64 MessageGeneration = 0;
@@ -1294,6 +1404,17 @@ FString FEChartsWidgetJavascript::BuildSetInteractionModeCommand(
 		TEXT("window.UEEChartsHost.setInteractionMode(%llu,\"%s\");"),
 		RequestId,
 		*InteractionModeName(InteractionMode));
+}
+
+FString FEChartsWidgetJavascript::BuildSetLegendSettingsCommand(
+	const uint64 RequestId,
+	const FString& PayloadBase64)
+{
+	if (RequestId == 0 || RequestId > 9007199254740991ULL || !IsStrictBase64(PayloadBase64)) return FString();
+	return FString::Printf(
+		TEXT("window.UEEChartsHost.setLegendSettingsBase64(%llu,\"%s\");"),
+		RequestId,
+		*PayloadBase64);
 }
 
 FString FEChartsWidgetJavascript::BuildExecuteJavaScriptCommand(const uint64 RequestId, const FString& PayloadBase64)

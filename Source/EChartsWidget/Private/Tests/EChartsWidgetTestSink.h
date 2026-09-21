@@ -200,6 +200,14 @@ public:
 	}
 
 	UFUNCTION()
+	void HandleLegendSettingsApplied(bool bSuccess, const FString& Message)
+	{
+		++LegendResultCount;
+		bLastLegendSuccess = bSuccess;
+		LastAdvancedMessage = Message;
+	}
+
+	UFUNCTION()
 	void HandleJavaScriptResult(int64 RequestId, bool bSuccess, const FString& Message)
 	{
 		++JavaScriptResultCount;
@@ -215,12 +223,14 @@ public:
 	int32 AppliedCount = 0;
 	int32 OptionResultCount = 0;
 	int32 InteractionResultCount = 0;
+	int32 LegendResultCount = 0;
 	int32 JavaScriptResultCount = 0;
 	int64 LastAppliedRevision = 0;
 	int32 LastAppliedPointCount = 0;
 	int64 LastJavaScriptRequestId = 0;
 	bool bLastOptionSuccess = false;
 	bool bLastInteractionSuccess = false;
+	bool bLastLegendSuccess = false;
 	bool bLastJavaScriptSuccess = false;
 	EEChartsInteractionMode LastInteractionMode = EEChartsInteractionMode::ClickOnly;
 	FString LastAdvancedMessage;

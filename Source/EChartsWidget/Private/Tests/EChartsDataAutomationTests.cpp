@@ -157,7 +157,10 @@ namespace EChartsDataTests
 			State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
 			State->Widget->SetForceWebGLUnavailableForTesting(bForceFallback);
 			State->SlateWidget = State->Widget->TakeWidget();
-			TArray<FEChartsDataPoint3D> Data3D = {{10.5, 200.0, 3.0, 4.0, 5.0}};
+			TArray<FEChartsDataPoint3D> Data3D = {
+				{10.5, 200.0, 3.0, 10.0, 5.0},
+				{11.5, 201.0, 6.0, 100.0, 8.0}
+			};
 			State->Widget->Set3DData(0, Data3D);
 			State->Widget->InitializeECharts(Template, EEChartsInteractionMode::ClickOnly);
 			State->Widget->ApplyEChartsChanges();
@@ -190,13 +193,13 @@ namespace EChartsDataTests
 			}
 			if (State->Sink->AppliedCount > 0)
 			{
-				Test->TestEqual(TEXT("3D CEF APPLIED point count"), State->Sink->LastAppliedPointCount, 1);
+				Test->TestEqual(TEXT("3D CEF APPLIED point count"), State->Sink->LastAppliedPointCount, 2);
 				Test->TestEqual(TEXT("3D CEF APPLIED revision"), State->Sink->LastAppliedRevision, int64(1));
 				const bool bExpect3D = ExpectedType.EndsWith(TEXT("3D"));
 				const bool bExpectHeatmap = ExpectedType == TEXT("heatmap");
 				const FString DataCheck = bExpectHeatmap
-					? TEXT("JSON.stringify(s.data[0])===JSON.stringify([0,0,3])&&JSON.stringify(s.ueOriginalData[0])===JSON.stringify([10.5,200,3,4,5])")
-					: TEXT("JSON.stringify(s.data[0])===JSON.stringify([10.5,200,3,4,5])");
+					? TEXT("JSON.stringify(s.data[0])===JSON.stringify([0,0,3])&&JSON.stringify(s.ueOriginalData[0])===JSON.stringify([10.5,200,3,10,5])")
+					: TEXT("JSON.stringify(s.data[0])===JSON.stringify([10.5,200,3,10,5])&&s.data[1][3]===100");
 				const bool bExpectBar3D = ExpectedType == TEXT("bar3D");
 				const FString CoordinateCheck = bExpectHeatmap
 					? TEXT("o.xAxis[0].type==='category'&&o.yAxis[0].type==='category'&&o.xAxis[0].data[0]===10.5&&o.yAxis[0].data[0]===200")
@@ -205,7 +208,9 @@ namespace EChartsDataTests
 						: (bExpect3D ? TEXT("hasGrid") : TEXT("!hasGrid&& !/3D$/.test(s.type)")));
 				const FString GraphicCheck = bExpectHeatmap
 					? TEXT("(function(){var g=window.UEEChartsHost.getGraphicShapeStatsForTesting();return g.heatmapRectCount>0&&g.allFinite;}())")
-					: TEXT("true");
+					: (bExpect3D
+						? TEXT("!o.xAxis&&!o.yAxis&&!o.grid&&o.visualMap[0].dimension===3&&o.visualMap[0].min===10&&o.visualMap[0].max===100&&(o.visualMap[0].seriesIndex===0||o.visualMap[0].seriesIndex[0]===0)")
+						: TEXT("true"));
 				State->Widget->ExecuteJavascript(FString::Printf(TEXT(
 					"(function(){var o=window.UEEChartsHost.getOptionForTesting();var s=o.series[0];"
 					"var hasGrid=!!o.grid3D;var ok=s.type==='%s'&&%s&&%s&&%s;"
@@ -258,6 +263,90 @@ namespace EChartsDataTests
 	private:
 		TSharedRef<FDataBrowserState> State;
 		FAutomationTestBase* Test;
+	};
+
+	class FNative3DStateRegressionCommand final : public IAutomationLatentCommand
+	{
+	public:
+		FNative3DStateRegressionCommand(const TSharedRef<FDataBrowserState>& InState, FAutomationTestBase* InTest)
+			: State(InState), Test(InTest) {}
+
+		virtual bool Update() override
+		{
+			if (Stage == 0)
+			{
+				State->Widget = MakeWidget();
+				State->Sink = NewObject<UEChartsWidgetTestSink>(); State->Sink->AddToRoot();
+				State->Widget->OnEChartsApplied.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleApplied);
+				State->Widget->OnEChartsError.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleError);
+				State->Widget->OnJavaScriptResult.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleJavaScriptResult);
+				State->Widget->OnConsoleMessage.AddDynamic(State->Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
+				FEChartsLegendSettings Legend;
+				Legend.Position = EEChartsLegendPosition::Right;
+				Legend.Orientation = EEChartsLegendOrientation::Vertical;
+				Legend.FontSize = 18;
+				Legend.ItemGap = 22;
+				State->Widget->SetLegendSettings(Legend);
+				State->SlateWidget = State->Widget->TakeWidget();
+				State->Widget->Set3DData(0, {{1.0, 2.0, 3.0, 10.0, 7.0}, {2.0, 3.0, 4.0, 100.0, 9.0}});
+				State->Widget->InitializeECharts(EEChartsTemplate::Bar3DHeightMap, EEChartsInteractionMode::ClickOnly);
+				State->Widget->ApplyEChartsChanges();
+				State->DeadlineSeconds = FPlatformTime::Seconds() + 30.0;
+				Stage = 1;
+				return false;
+			}
+			if (State->Sink->ErrorCount > 0)
+			{
+				Test->AddError(FString::Printf(TEXT("Native 3D state regression host error: %s"), *State->Sink->LastError));
+				State->Cleanup(); return true;
+			}
+			if (Stage == 1 && State->Sink->AppliedCount >= 1)
+			{
+				int64 RequestId = 0;
+				if (!State->Widget->ExecuteEChartsJavaScript(
+					TEXT("if(!host.setViewControlForTesting(17,23,180)) throw new Error('camera helper failed');"), RequestId))
+				{
+					Test->AddError(TEXT("Could not dispatch deterministic CEF camera setup.")); State->Cleanup(); return true;
+				}
+				Stage = 2; State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0; return false;
+			}
+			if (Stage == 2 && State->Sink->JavaScriptResultCount >= 1)
+			{
+				State->Widget->Set3DData(0, {{3.0, 4.0, 5.0, 20.0, 8.0}, {4.0, 5.0, 6.0, 100.0, 10.0}});
+				State->Widget->ApplyEChartsChanges();
+				Stage = 3; State->DeadlineSeconds = FPlatformTime::Seconds() + 20.0; return false;
+			}
+			if (Stage == 3 && State->Sink->AppliedCount >= 2)
+			{
+				int64 RequestId = 0;
+				const FString Probe = TEXT(
+					"(function(){var o=host.getOptionForTesting(),v=o.grid3D[0].viewControl,vm=o.visualMap[0],l=o.legend[0],s=o.series[0];"
+					"var si=vm.seriesIndex;var ok=v.alpha===17&&v.beta===23&&v.distance===180&&vm.dimension===3&&vm.min===20&&vm.max===100&&"
+					"(si===0||si[0]===0)&&s.data[1][3]===100&&!o.xAxis&&!o.yAxis&&!o.grid&&l.right==='2%'&&l.orient==='vertical'&&"
+					"l.textStyle.fontSize===18&&l.itemGap===22;console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+(ok?'OK':'BAD'));}());");
+				if (!State->Widget->ExecuteEChartsJavaScript(Probe, RequestId))
+				{
+					Test->AddError(TEXT("Could not dispatch native 3D CEF state probe.")); State->Cleanup(); return true;
+				}
+				Stage = 4; State->DeadlineSeconds = FPlatformTime::Seconds() + 10.0; return false;
+			}
+			if (Stage == 4 && State->Sink->DataOptionReportCount > 0)
+			{
+				Test->TestTrue(TEXT("Real CEF preserves camera and applies ColorValue/legend semantics"), State->Sink->bLastDataOptionSucceeded);
+				State->Cleanup(); return true;
+			}
+			if (FPlatformTime::Seconds() >= State->DeadlineSeconds)
+			{
+				Test->AddError(FString::Printf(TEXT("Timed out in native 3D state regression stage %d."), Stage));
+				State->Cleanup(); return true;
+			}
+			return false;
+		}
+
+	private:
+		TSharedRef<FDataBrowserState> State;
+		FAutomationTestBase* Test;
+		int32 Stage = 0;
 	};
 
 	class FStartCacheReplayCommand : public IAutomationLatentCommand
@@ -674,7 +763,7 @@ bool FEChartsPayloadRoundTripTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Decoded payload is JSON"), FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid());
 	TestEqual(TEXT("Revision survives"), static_cast<int64>(Root->GetNumberField(TEXT("revision"))), int64(9));
 	const TArray<TSharedPtr<FJsonValue>>& JsonSeries = Root->GetArrayField(TEXT("series"));
-	TestEqual(TEXT("All four deterministic slots emitted"), JsonSeries.Num(), 4);
+	TestEqual(TEXT("Only non-empty series are emitted"), JsonSeries.Num(), 3);
 	TestEqual(TEXT("Dangerous name round trips exactly"), JsonSeries[0]->AsObject()->GetStringField(TEXT("name")), Series[0].Name);
 	TestEqual(TEXT("Category round trips exactly"),
 		JsonSeries[1]->AsObject()->GetArrayField(TEXT("data"))[0]->AsArray()[0]->AsString(),
@@ -685,6 +774,23 @@ bool FEChartsPayloadRoundTripTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("3D payload contains Z"), Json3D[2]->AsNumber(), 3.0);
 	TestEqual(TEXT("3D payload contains ColorValue"), Json3D[3]->AsNumber(), 4.0);
 	TestEqual(TEXT("3D payload contains SymbolSizeValue"), Json3D[4]->AsNumber(), 5.0);
+
+	TStaticArray<FEChartsSeriesData, FEChartsPayloadBuilder::MaxSeriesCount> SparseSeries;
+	SparseSeries[2].Name = TEXT("Original slot three");
+	SparseSeries[2].Type = EEChartsSeriesDataType::Data3D;
+	SparseSeries[2].Data3D.Add({6.0, 7.0, 8.0, 9.0, 10.0});
+	FString SparseBase64;
+	TestTrue(TEXT("Sparse payload builds"), FEChartsPayloadBuilder::BuildBase64Payload(
+		EEChartsTemplate::DataTableScatter3D, EEChartsXAxisMode::ShowAll, SparseSeries, 10, SparseBase64, PointCount, Error));
+	TestEqual(TEXT("Sparse payload point count stays based on all four cache slots"), PointCount, 1);
+	TestTrue(TEXT("Sparse Base64 decodes"), FEChartsPayloadBuilder::DecodeBase64Payload(SparseBase64, Json, Error));
+	Root.Reset();
+	const TSharedRef<TJsonReader<>> SparseReader = TJsonReaderFactory<>::Create(Json);
+	TestTrue(TEXT("Sparse decoded payload is JSON"), FJsonSerializer::Deserialize(SparseReader, Root) && Root.IsValid());
+	const TArray<TSharedPtr<FJsonValue>>& SparseJsonSeries = Root->GetArrayField(TEXT("series"));
+	TestEqual(TEXT("Sparse payload compacts to one series"), SparseJsonSeries.Num(), 1);
+	TestEqual(TEXT("Sparse payload compact index starts at zero"), SparseJsonSeries[0]->AsObject()->GetIntegerField(TEXT("index")), 0);
+	TestEqual(TEXT("Sparse payload keeps original slot name"), SparseJsonSeries[0]->AsObject()->GetStringField(TEXT("name")), SparseSeries[2].Name);
 	return true;
 }
 
@@ -707,7 +813,16 @@ bool FEChartsPayloadLimitsTest::RunTest(const FString& Parameters)
 		FEChartsPayloadBuilder::GetSerializationAttemptCountForTesting(), 0);
 	Series[0].Numeric2D.Reset();
 	Series[0].Name = FString::ChrN(FEChartsPayloadBuilder::MaxJsonBytes / 6 + 1, TCHAR(1));
-	TestFalse(TEXT("Oversized UTF-8 JSON estimate fails before serialization"), FEChartsPayloadBuilder::BuildBase64Payload(
+	TestTrue(TEXT("Empty series name is not serialized or charged to the payload"), FEChartsPayloadBuilder::BuildBase64Payload(
+		EEChartsTemplate::SegmentedAreaLine, EEChartsXAxisMode::ShowAll, Series, 1, Base64, PointCount, Error));
+	TestEqual(TEXT("Empty payload has zero points"), PointCount, 0);
+	FString EmptyJson;
+	TestTrue(TEXT("Empty payload decodes"), FEChartsPayloadBuilder::DecodeBase64Payload(Base64, EmptyJson, Error));
+	TestTrue(TEXT("Empty payload emits a compact empty series array"), EmptyJson.Contains(TEXT("\"series\":[]")));
+	Series[0].Numeric2D.Add({1.0, 2.0});
+	Base64.Reset();
+	FEChartsPayloadBuilder::ResetSafetyInstrumentationForTesting();
+	TestFalse(TEXT("Oversized active UTF-8 name fails before serialization"), FEChartsPayloadBuilder::BuildBase64Payload(
 		EEChartsTemplate::SegmentedAreaLine, EEChartsXAxisMode::ShowAll, Series, 1, Base64, PointCount, Error));
 	TestTrue(TEXT("JSON byte limit error is clear"), Error.Contains(TEXT("16777216")));
 	TestEqual(TEXT("Long escaped control string rejects before serializer"),
@@ -889,6 +1004,25 @@ bool FEChartsCEF3DEffectiveTemplatesTest::RunTest(const FString& Parameters)
 	ADD_3D_CEF_CASE(EEChartsTemplate::Bar3DHeightMap, true, "heatmap");
 	ADD_3D_CEF_CASE(EEChartsTemplate::DataTableScatter3D, true, "scatter");
 #undef ADD_3D_CEF_CASE
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsCEFNative3DStateRegressionTest,
+	"EChartsWidget.Integration.CEFNative3DStateRegression", EChartsDataTests::Flags)
+bool FEChartsCEFNative3DStateRegressionTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI")))
+	{
+		AddInfo(TEXT("Not executed under NullRHI: native 3D camera state requires D3D12."));
+		return true;
+	}
+	if (!FSlateApplication::IsInitialized())
+	{
+		AddError(TEXT("Native 3D camera state regression requires initialized Slate."));
+		return false;
+	}
+	const TSharedRef<EChartsDataTests::FDataBrowserState> State = MakeShared<EChartsDataTests::FDataBrowserState>();
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsDataTests::FNative3DStateRegressionCommand(State, this));
 	return true;
 }
 

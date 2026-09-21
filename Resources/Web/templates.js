@@ -87,7 +87,7 @@
     return {
       animation: false, backgroundColor: 'transparent', tooltip: {}, legend: { data: ['Height'] },
       visualMap: { max: 60, inRange: { color: ['#313695', '#74add1', '#ffffbf', '#f46d43', '#a50026'] } },
-      xAxis3D: { type: 'category', data: input.categories }, yAxis3D: { type: 'category', data: input.categories },
+      xAxis3D: { type: 'value' }, yAxis3D: { type: 'value' },
       zAxis3D: { type: 'value' }, grid3D: { boxWidth: 120, boxDepth: 120, viewControl: { autoRotate: false } },
       series: [{ name: 'Height', type: 'bar3D', data: input.data, shading: 'lambert' }]
     };

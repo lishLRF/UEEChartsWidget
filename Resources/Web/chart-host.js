@@ -36,6 +36,11 @@
     let currentOption = null;
     let currentPayload = null;
     let currentInteractionMode = 'ClickOnly';
+    let currentLegendSettings = {
+      bShow: true, position: 'Auto', orientation: 'Auto', fontSize: 12,
+      itemGap: 10, itemWidth: 25, itemHeight: 14, customXPercent: 50, customYPercent: 5
+    };
+    let lastResponsiveLegendLayout = '';
 
     function clone(value) {
       if (Array.isArray(value)) return value.map(clone);
@@ -105,6 +110,76 @@
       option[key] = Array.isArray(option[key]) ? axes : axes[0];
     }
 
+    function clampNumber(value, minimum, maximum, fallback) {
+      return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
+    }
+
+    function normalizeLegendSettings(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Legend settings must be an object');
+      const position = ['Auto', 'Top', 'Bottom', 'Left', 'Right', 'Custom'].includes(value.position) ? value.position : null;
+      const orientation = ['Auto', 'Horizontal', 'Vertical'].includes(value.orientation) ? value.orientation : null;
+      if (!position || !orientation || typeof value.bShow !== 'boolean') throw new Error('Invalid legend settings');
+      return {
+        bShow: value.bShow,
+        position,
+        orientation,
+        fontSize: clampNumber(value.fontSize, 6, 72, 12),
+        itemGap: clampNumber(value.itemGap, 0, 100, 10),
+        itemWidth: clampNumber(value.itemWidth, 1, 100, 25),
+        itemHeight: clampNumber(value.itemHeight, 1, 100, 14),
+        customXPercent: clampNumber(value.customXPercent, 0, 100, 50),
+        customYPercent: clampNumber(value.customYPercent, 0, 100, 5)
+      };
+    }
+
+    function legendLayout(settings) {
+      const width = chart && typeof chart.getWidth === 'function' ? chart.getWidth() : chartElement.clientWidth;
+      const wide = !Number.isFinite(width) || width >= 720;
+      const position = settings.position === 'Auto' ? (wide ? 'Top' : 'Right') : settings.position;
+      const orientation = settings.orientation === 'Auto'
+        ? ((position === 'Left' || position === 'Right') ? 'vertical' : 'horizontal')
+        : settings.orientation.toLowerCase();
+      const layout = { orient: orientation };
+      if (position === 'Top') { layout.left = 'center'; layout.top = '5%'; }
+      else if (position === 'Bottom') { layout.left = 'center'; layout.bottom = '5%'; }
+      else if (position === 'Left') { layout.left = '2%'; layout.top = 'middle'; }
+      else if (position === 'Right') { layout.right = '2%'; layout.top = 'middle'; }
+      else { layout.left = settings.customXPercent + '%'; layout.top = settings.customYPercent + '%'; }
+      return layout;
+    }
+
+    function applyLegendSettings(option, settings) {
+      const layout = legendLayout(settings);
+      const legends = Array.isArray(option.legend) ? option.legend : [option.legend || {}];
+      legends.forEach(function (legend) {
+        ['left', 'right', 'top', 'bottom'].forEach(function (field) { delete legend[field]; });
+        Object.assign(legend, layout, {
+          show: settings.bShow,
+          type: 'scroll',
+          itemGap: settings.itemGap,
+          itemWidth: settings.itemWidth,
+          itemHeight: settings.itemHeight,
+          textStyle: Object.assign({}, legend.textStyle || {}, { fontSize: settings.fontSize })
+        });
+      });
+      option.legend = Array.isArray(option.legend) ? legends : legends[0];
+      return JSON.stringify(layout);
+    }
+
+    function isNative3DOption(option) {
+      const series = Array.isArray(option.series) ? option.series : (option.series ? [option.series] : []);
+      return series.length > 0 && series.every(function (item) { return item.type === 'bar3D' || item.type === 'scatter3D'; });
+    }
+
+    function applyDataOption(option) {
+      if (!isNative3DOption(option)) {
+        chart.setOption(option, { notMerge: true, lazyUpdate: false });
+        return;
+      }
+      const patch = { series: clone(option.series), legend: clone(option.legend), visualMap: clone(option.visualMap) };
+      chart.setOption(patch, { notMerge: false, lazyUpdate: false, replaceMerge: ['series', 'visualMap'] });
+    }
+
     function optionForPayload(payload) {
       if (!templateBaseOption || !currentEffectiveTemplate) throw new Error('Template must be rendered before applying data');
       const option = clone(templateBaseOption);
@@ -160,6 +235,9 @@
         });
       }
       let has2DSeries = false;
+      const colorSeriesIndices = [];
+      const colorValues = [];
+      let colorDimension = 3;
       option.series = payload.series.map(function (input, index) {
         const prototype = oldSeries[index] || oldSeries[0] || {};
         const output = Object.assign({}, clone(prototype), { name: input.name });
@@ -211,6 +289,9 @@
           if (output.type === 'scatter3D' || output.type === 'scatter') {
             output.symbolSize = function (value) { return value[4]; };
           }
+          colorSeriesIndices.push(index);
+          colorDimension = output.type === 'heatmap' ? 2 : 3;
+          input.data.forEach(function (point) { colorValues.push(point[colorDimension]); });
         } else {
           has2DSeries = true;
           output.type = currentEffectiveTemplate.indexOf('Scatter') >= 0 ? 'scatter' : 'line';
@@ -245,11 +326,41 @@
         updateAxis(option, 'yAxis3D', { type: 'value', data: undefined });
         updateAxis(option, 'zAxis3D', { type: 'value', data: undefined });
       }
+      if (colorSeriesIndices.length > 0) {
+        const minimum = Math.min.apply(null, colorValues);
+        const maximum = Math.max.apply(null, colorValues);
+        const range = minimum === maximum
+          ? (minimum > 0 ? [0, minimum] : (minimum < 0 ? [minimum, 0] : [0, 1]))
+          : [minimum, maximum];
+        const visualMaps = Array.isArray(option.visualMap) ? option.visualMap : [option.visualMap || {}];
+        visualMaps.forEach(function (visualMap) {
+          visualMap.dimension = colorDimension;
+          visualMap.seriesIndex = clone(colorSeriesIndices);
+          visualMap.min = range[0];
+          visualMap.max = range[1];
+        });
+        option.visualMap = Array.isArray(option.visualMap) ? visualMaps : visualMaps[0];
+      }
+      if (isNative3DOption(option)) {
+        delete option.xAxis;
+        delete option.yAxis;
+        delete option.grid;
+      }
+      lastResponsiveLegendLayout = applyLegendSettings(option, currentLegendSettings);
       return window.UEEChartsTemplates.applyInteractionMode(option, currentInteractionMode);
     }
     function resizeChart() {
       if (!chart) return;
       chart.resize();
+      if (currentOption && currentLegendSettings.position === 'Auto') {
+        const candidate = clone(currentOption);
+        const layout = applyLegendSettings(candidate, currentLegendSettings);
+        if (layout !== lastResponsiveLegendLayout) {
+          lastResponsiveLegendLayout = layout;
+          currentOption.legend = clone(candidate.legend);
+          chart.setOption({ legend: clone(candidate.legend) }, { notMerge: false, lazyUpdate: false });
+        }
+      }
       if (window.__UE_ECHARTS_TEST_RESIZE_PROBE__ === true) {
         emit('TEST_RESIZED', String(Math.round(chart.getWidth())) + ':' + String(Math.round(chart.getHeight())));
       }
@@ -259,6 +370,7 @@
         try {
           const result = window.UEEChartsTemplates.createTemplate(template, payload || {}, webglAvailable);
           const option = window.UEEChartsTemplates.applyInteractionMode(result.option, interactionMode || 'ClickOnly');
+          lastResponsiveLegendLayout = applyLegendSettings(option, currentLegendSettings);
           if (result.effectiveTemplate !== result.requestedTemplate) {
             emit('WARNING', 'WebGL unavailable; using ' + result.effectiveTemplate + ' for ' + result.requestedTemplate);
           }
@@ -298,6 +410,23 @@
         } catch (error) {
           const detail = error && error.message ? error.message : String(error);
           emitResult('INTERACTION_RESULT', requestId, false, detail);
+          return false;
+        }
+      },
+      setLegendSettingsBase64: function (requestId, base64) {
+        try {
+          if (!validRequestId(requestId)) throw new Error('Invalid legend request id');
+          const settings = normalizeLegendSettings(JSON.parse(decodeBase64Text(base64, 64 * 1024, 'legend settings')));
+          if (!currentOption) throw new Error('Chart option is not ready');
+          currentLegendSettings = settings;
+          lastResponsiveLegendLayout = applyLegendSettings(currentOption, currentLegendSettings);
+          if (templateBaseOption) applyLegendSettings(templateBaseOption, currentLegendSettings);
+          chart.setOption({ legend: clone(currentOption.legend) }, { notMerge: false, lazyUpdate: false });
+          emitResult('LEGEND_RESULT', requestId, true, 'Legend settings applied');
+          return true;
+        } catch (error) {
+          const detail = error && error.message ? error.message : String(error);
+          emitResult('LEGEND_RESULT', requestId, false, detail);
           return false;
         }
       },
@@ -396,7 +525,7 @@
           const payload = decodePayload(base64);
           const pointCount = validatePayload(payload);
           const option = optionForPayload(payload);
-          chart.setOption(option, { notMerge: true, lazyUpdate: false });
+          applyDataOption(option);
           currentOption = option;
           currentPayload = clone(payload);
           emit('APPLIED', String(payload.revision) + ':' + String(pointCount));
@@ -424,7 +553,7 @@
           candidate.series[0].data.push.apply(candidate.series[0].data, clone(delta.series.data));
           const pointCount = validatePayload(candidate);
           const option = optionForPayload(candidate);
-          chart.setOption(option, { notMerge: true, lazyUpdate: false });
+          applyDataOption(option);
           currentOption = option;
           currentPayload = candidate;
           emit('APPLIED', String(candidate.revision) + ':' + String(pointCount));
@@ -437,6 +566,11 @@
       },
       getOptionForTesting: function () {
         return chart.getOption();
+      },
+      setViewControlForTesting: function (alpha, beta, distance) {
+        if (![alpha, beta, distance].every(Number.isFinite)) return false;
+        chart.setOption({ grid3D: { viewControl: { alpha, beta, distance } } }, { notMerge: false, lazyUpdate: false });
+        return true;
       },
       getGraphicShapeStatsForTesting: function () {
         const displayList = chart.getZr().storage.getDisplayList(true);

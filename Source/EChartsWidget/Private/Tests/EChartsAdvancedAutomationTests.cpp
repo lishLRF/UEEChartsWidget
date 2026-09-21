@@ -686,7 +686,7 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Pre-Ready interaction is cached"), Widget->InteractionMode, EEChartsInteractionMode::Disabled);
 	TestEqual(TEXT("Pre-Ready requests are not sent"), Widget->GetPendingAdvancedRequestCountForTesting(), 0);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
-	TestEqual(TEXT("Ready replays cached option and interaction"), Widget->GetPendingAdvancedRequestCountForTesting(), 2);
+	TestEqual(TEXT("Ready replays cached option, interaction, and legend"), Widget->GetPendingAdvancedRequestCountForTesting(), 3);
 
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_OPTION_RESULT__:0:1:1:stale"), FString(), 0);
 	TestEqual(TEXT("Old-generation option result is ignored"), Sink->OptionResultCount, 0);
@@ -695,6 +695,7 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 
 	const int64 OptionRequest = Widget->GetPendingOptionRequestIdForTesting();
 	const int64 InteractionRequest = Widget->GetPendingInteractionRequestIdForTesting();
+	const int64 LegendRequest = Widget->GetPendingLegendRequestIdForTesting();
 	TestTrue(TEXT("Newer candidate queues behind the in-flight transaction"), Widget->SetEChartsOptionJSON(TEXT(
 		"{\"title\":{\"text\":\"bad\"},\"series\":[{\"type\":\"line\",\"xAxisIndex\":999,\"data\":[9]}]}")));
 	TestEqual(TEXT("Queued candidate does not replace in-flight request id"), Widget->GetPendingOptionRequestIdForTesting(), OptionRequest);
@@ -714,6 +715,7 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Option failure preserves last-good cache"), Widget->GetCachedOptionBase64ForTesting(), LastGood);
 	TestTrue(TEXT("Option failure clears rejected candidate"), Widget->GetPendingOptionBase64ForTesting().IsEmpty());
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:1:%lld:1:Disabled"), InteractionRequest), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_LEGEND_RESULT__:1:%lld:1:default"), LegendRequest), FString(), 0);
 	TestEqual(TEXT("Interaction ACK has a dedicated result"), Sink->InteractionResultCount, 1);
 	TestTrue(TEXT("Interaction ACK reports success"), Sink->bLastInteractionSuccess);
 
@@ -734,20 +736,23 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_JAVASCRIPT_RESULT__:1:%lld:1:late"), JavaScriptRequest), FString(), 0);
 	TestEqual(TEXT("Old-generation JavaScript result is ignored"), Sink->JavaScriptResultCount, 1);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
-	TestEqual(TEXT("Rebuild replays option and interaction only"), Widget->GetPendingAdvancedRequestCountForTesting(), 2);
+	TestEqual(TEXT("Rebuild replays option, interaction, and legend"), Widget->GetPendingAdvancedRequestCountForTesting(), 3);
 	const int32 ResultsBeforeReplayFailure = Sink->OptionResultCount;
 	const int64 ReplayRequest = Widget->GetPendingOptionRequestIdForTesting();
 	const int64 RebuildInteractionRequest = Widget->GetPendingInteractionRequestIdForTesting();
+	const int64 RebuildLegendRequest = Widget->GetPendingLegendRequestIdForTesting();
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(
 		TEXT("__UE_ECHARTS_OPTION_RESULT__:2:%lld:0:replay failed; previous chart restored"), ReplayRequest), FString(), 0);
 	TestEqual(TEXT("Cached replay failure broadcasts exactly once"), Sink->OptionResultCount, ResultsBeforeReplayFailure + 1);
 	TestFalse(TEXT("Cached replay failure reports false"), Sink->bLastOptionSuccess);
 	TestEqual(TEXT("Cached replay failure remains non-terminal"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
 	TestEqual(TEXT("Cached replay failure clears its in-flight request"), Widget->GetPendingOptionRequestIdForTesting(), int64(0));
-	TestEqual(TEXT("Cached replay failure does not immediately retry in the same generation"), Widget->GetPendingAdvancedRequestCountForTesting(), 1);
+	TestEqual(TEXT("Cached replay failure does not immediately retry in the same generation"), Widget->GetPendingAdvancedRequestCountForTesting(), 2);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_WARNING__:2:unrelated"), FString(), 0);
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(
 		TEXT("__UE_ECHARTS_INTERACTION_RESULT__:2:%lld:1:Disabled"), RebuildInteractionRequest), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(
+		TEXT("__UE_ECHARTS_LEGEND_RESULT__:2:%lld:1:default"), RebuildLegendRequest), FString(), 0);
 	TestEqual(TEXT("Unrelated messages do not restart cached replay"), Widget->GetPendingOptionRequestIdForTesting(), int64(0));
 	TestEqual(TEXT("Unrelated messages do not duplicate option result"), Sink->OptionResultCount, ResultsBeforeReplayFailure + 1);
 	TestEqual(TEXT("All generation-two advanced requests settle"), Widget->GetPendingAdvancedRequestCountForTesting(), 0);
@@ -755,7 +760,7 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	Widget->PrepareRebuildForTesting();
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
 	TestTrue(TEXT("A new generation may retry the retained last-good option"), Widget->GetPendingOptionRequestIdForTesting() > 0);
-	TestEqual(TEXT("Generation-three replay and interaction are each queued once"), Widget->GetPendingAdvancedRequestCountForTesting(), 2);
+	TestEqual(TEXT("Generation-three option, interaction, and legend are each queued once"), Widget->GetPendingAdvancedRequestCountForTesting(), 3);
 
 	Widget->ReleaseSlateResources(false);
 	Widget->RemoveFromRoot();
@@ -856,6 +861,65 @@ bool FEChartsAdvancedReleaseAndCoalescingTest::RunTest(const FString& Parameters
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:2:%lld:1:FullHover"), ReplayedInteraction), FString(), 0);
 	TestEqual(TEXT("Latest interaction replay broadcasts once"), Sink->InteractionResultCount, 3);
 	TestEqual(TEXT("Latest interaction survives Release"), Sink->LastInteractionMode, EEChartsInteractionMode::FullHover);
+	EChartsAdvancedTests::DestroyWidget(Widget); Sink->RemoveFromRoot();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsLegendSettingsLifecycleTest,
+	"EChartsWidget.Advanced.LegendSettingsLifecycle", EChartsAdvancedTests::Flags)
+bool FEChartsLegendSettingsLifecycleTest::RunTest(const FString& Parameters)
+{
+	UEChartsWidget* Widget = EChartsAdvancedTests::MakeWidget();
+	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+	Widget->OnLegendSettingsApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleLegendSettingsApplied);
+	TestNotNull(TEXT("Set Legend Settings is reflected"), Widget->FindFunction(TEXT("SetLegendSettings")));
+	TestNotNull(TEXT("Reset Legend Settings is reflected"), Widget->FindFunction(TEXT("ResetLegendSettings")));
+	TestTrue(TEXT("Legend settings default visible"), Widget->LegendSettings.bShow);
+	TestEqual(TEXT("Legend settings default position"), Widget->LegendSettings.Position, EEChartsLegendPosition::Auto);
+	TestEqual(TEXT("Legend settings default orientation"), Widget->LegendSettings.Orientation, EEChartsLegendOrientation::Auto);
+	TestEqual(TEXT("Legend settings default font size"), Widget->LegendSettings.FontSize, 12);
+
+	Widget->InitializeECharts(); Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	const int64 InitialRequest = Widget->GetPendingLegendRequestIdForTesting();
+	TestTrue(TEXT("Ready sends cached default legend settings"), InitialRequest > 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_LEGEND_RESULT__:1:%lld:1:default"), InitialRequest), FString(), 0);
+
+	FEChartsLegendSettings Settings;
+	Settings.Position = EEChartsLegendPosition::Custom;
+	Settings.Orientation = EEChartsLegendOrientation::Vertical;
+	Settings.FontSize = 1000;
+	Settings.ItemGap = -10;
+	Settings.ItemWidth = 0;
+	Settings.ItemHeight = 1000;
+	Settings.CustomXPercent = 120.0f;
+	Settings.CustomYPercent = -20.0f;
+	Widget->SetLegendSettings(Settings);
+	TestEqual(TEXT("Legend font size clamps"), Widget->LegendSettings.FontSize, 72);
+	TestEqual(TEXT("Legend item gap clamps"), Widget->LegendSettings.ItemGap, 0);
+	TestEqual(TEXT("Legend item width clamps"), Widget->LegendSettings.ItemWidth, 1);
+	TestEqual(TEXT("Legend item height clamps"), Widget->LegendSettings.ItemHeight, 100);
+	TestEqual(TEXT("Legend custom X clamps"), Widget->LegendSettings.CustomXPercent, 100.0f);
+	TestEqual(TEXT("Legend custom Y clamps"), Widget->LegendSettings.CustomYPercent, 0.0f);
+	const int64 FirstRequest = Widget->GetPendingLegendRequestIdForTesting();
+	Settings.FontSize = 20;
+	Widget->SetLegendSettings(Settings);
+	TestEqual(TEXT("Rapid legend settings keep one request in flight"), Widget->GetPendingLegendRequestIdForTesting(), FirstRequest);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_LEGEND_RESULT__:1:%lld:1:first"), FirstRequest), FString(), 0);
+	const int64 LatestRequest = Widget->GetPendingLegendRequestIdForTesting();
+	TestTrue(TEXT("Latest legend setting follows first ACK"), LatestRequest > 0 && LatestRequest != FirstRequest);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_LEGEND_RESULT__:1:%lld:1:latest"), LatestRequest), FString(), 0);
+	TestEqual(TEXT("Legend ACK event count"), Sink->LegendResultCount, 3);
+
+	Widget->ReleaseSlateResources(false); Widget->PrepareRebuildForTesting();
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	const int64 ReplayRequest = Widget->GetPendingLegendRequestIdForTesting();
+	TestTrue(TEXT("Release rebuild replays legend settings"), ReplayRequest > 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_LEGEND_RESULT__:2:%lld:1:replayed"), ReplayRequest), FString(), 0);
+	TestEqual(TEXT("Latest legend settings survive rebuild"), Widget->LegendSettings.FontSize, 20);
+	Widget->ResetLegendSettings();
+	TestEqual(TEXT("Reset restores default legend position"), Widget->LegendSettings.Position, EEChartsLegendPosition::Auto);
+	TestEqual(TEXT("Reset restores default font size"), Widget->LegendSettings.FontSize, 12);
+
 	EChartsAdvancedTests::DestroyWidget(Widget); Sink->RemoveFromRoot();
 	return true;
 }

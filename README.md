@@ -103,6 +103,7 @@ flowchart LR
 ```text
 On Chart Ready
   → Set Series Name(0, "Temperature")
+  → Set Legend Settings(Position=Auto, Orientation=Auto, FontSize=12)
   → Add Data Point(0, 0.0, 21.5)
   → Add Data Point(0, 1.0, 22.1)
   → Add Data Point(0, 2.0, 23.0)
@@ -113,6 +114,7 @@ On Chart Ready
 
 - **手动 Apply**：每批修改后调用 `Apply ECharts Changes`。
 - **Auto Apply**：`Set Auto Apply Enabled(true, Hz)`；`Hz` 夹紧到 **1–30 Hz**，默认 10 Hz。它合并修改，并等待上一笔浏览器 ACK，避免无限堆积。
+- 图例数量不手填：它始终等于当前有数据的非空系列数；`Set Series Name` 只修改对应图例名称。`Set Legend Settings` 可覆盖显示、位置、方向、间距、字号和图标尺寸，`Reset Legend Settings` 恢复响应式默认值。
 
 ## 4. 模板与 WebGL 回退
 
@@ -123,7 +125,7 @@ On Chart Ready
 | `DataTableScatter3D` | 3D 散点 | `DataTableScatter2D` scatter |
 | `CustomOption` | 自定义 ECharts option | 取决于用户 option；不会自动改写任意自定义 3D option |
 
-3D 点为 `[X, Y, Z, ColorValue, SymbolSizeValue]`。`Bar3DHeightMap` 使用数值型 3D 轴；回退 heatmap 会把任意数值 X/Y 映射到稳定分类格点。`DataTableScatter3D` 回退为 2D scatter。
+3D 点为 `[X, Y, Z, ColorValue, SymbolSizeValue]`。原生 Bar3D/Scatter3D 用 `ColorValue` 自动计算 visualMap 色域、用 `SymbolSizeValue` 控制散点大小；纯原生 3D option 不包含 2D `xAxis/yAxis/grid`。`Bar3DHeightMap` 使用数值型 3D 轴；回退 heatmap 会把任意数值 X/Y 映射到稳定分类格点并以 Z 着色，Scatter2D 回退仍以 `ColorValue` 着色。Auto Apply 和普通 Apply 只合并数据/图例/色域，不重建 `grid3D`，因此保留用户当前视角。
 
 回退会设置 `Last Warning`、广播 Warning，并在 `Effective Template` 记录实际名称。所有内置 3D 模板的 `grid3D.viewControl.autoRotate` 都为 `false`。
 
@@ -171,9 +173,13 @@ On Chart Ready
 | `Apply ECharts Changes()` | `void`；提交最新 dirty revision；未 Ready 时延后，在途时等 ACK。 |
 | `Set Auto Apply Enabled(Enabled, Max Updates Per Second=10.0)` | `void`；夹紧 1–30 Hz。 |
 
+### 5.4 图例设置
+
+`Set Legend Settings(Settings)` 与 `Reset Legend Settings()` 位于 `ECharts|Legend`。`FEChartsLegendSettings` 默认显示图例，位置/方向均为 Auto，字号 12、间距 10、图标 25×14、Custom X/Y 为 50%/5%；数值会按 Blueprint 元数据范围在 C++ 再次夹紧。Auto 在宽度 ≥720 CSS px 时顶部居中横排，窄窗口在右侧纵排；Top/Bottom/Left/Right/Custom 和 Horizontal/Vertical 可显式覆盖。设置会缓存，在 Loading、Release/Rebuild 后重放，不使用 Tick 或轮询。
+
 无效索引、类型冲突、NaN/Infinity、空分类、总点数或 JSON 超限会返回 false/广播错误；批量 Set/Append 不会半写入。
 
-### 5.4 DataTable API
+### 5.5 DataTable API
 
 | 节点 | 返回/说明 |
 | --- | --- |
@@ -182,7 +188,7 @@ On Chart Ready
 | `Load Data Table(Rows Per Frame=256)` | `void`；预算夹紧 1–4096；分帧读取、worker 排序/转换/序列化，安装到 Series 0 并自动 Apply。 |
 | `Cancel Data Table Load()` | `void`；取消 Reading/Processing/Applying，并尽可能恢复加载前 Series 0/轴。 |
 
-### 5.5 Streaming API
+### 5.6 Streaming API
 
 | 节点 | 返回/说明 |
 | --- | --- |
@@ -193,7 +199,7 @@ On Chart Ready
 | `Resume Data Table Streaming()` | `void`；仅 Paused 有效。 |
 | `Stop Data Table Streaming()` | `void`；停止并释放准备缓存，保留显示窗口。 |
 
-### 5.6 状态与事件
+### 5.7 状态与事件
 
 核心 Blueprint Read Only：`Current Template`、`Interaction Mode`、`Runtime State`、`Last Error`、`Last Warning`、`Effective Template`、`X Axis Mode`、`Is Dirty`、`Last Applied Revision/Point Count`、`Auto Apply Enabled/Max Updates Per Second`。
 
@@ -468,6 +474,7 @@ Set X Axis Mode(Category) → Apply
 ```text
 Initialize(DataTableScatter3D, ClickOnly)
 On Ready → Set 3D Data(0, [(1,2,3,3,10),(2,4,1,1,18)]) → Apply
+          → Set Legend Settings(Position=Auto, Orientation=Auto, FontSize=12)
 On Rendered → 检查 Effective Template 是否 DataTableScatter3D 或 DataTableScatter2D
 ```
 
