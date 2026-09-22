@@ -19,7 +19,8 @@ public:
 		FString& OutBase64,
 		int32& OutPointCount,
 		FString& OutError,
-		bool bPreserveCategoryOrder = false);
+		bool bPreserveCategoryOrder = false,
+		bool bPointWindow2D = false);
 
 	static bool DecodeBase64Payload(const FString& Base64, FString& OutJson, FString& OutError);
 	static bool BuildStreamDeltaBase64(

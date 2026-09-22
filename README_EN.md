@@ -67,6 +67,9 @@ Set Category Series Data(Series Index, FEChartsCategoryDataPoint[]) -> bool
 Append Category Series Data(Series Index, FEChartsCategoryDataPoint[]) -> bool
 Get Category Series Data(Series Index) -> FEChartsCategoryDataPoint[]
 
+Set 2D Point Window(Enabled, Max Points=1000) -> void
+Reset 2D Point Window() -> void
+
 Set 3D Data(Series Index, FEChartsDataPoint3D[]) -> bool
 Append 3D Data(Series Index, FEChartsDataPoint3D[]) -> bool
 Get 3D Data(Series Index) -> FEChartsDataPoint3D[]
@@ -81,11 +84,17 @@ Set Auto Apply Enabled(Enabled, Max Updates Per Second=10.0) -> void
 
 `FEChartsDataPoint3D` contains `X, Y, Z, ColorValue, SymbolSizeValue`. Native Bar3D/Scatter3D derives the visualMap range from `ColorValue`; Scatter3D uses `SymbolSizeValue`. A native-only 3D option has no 2D `xAxis`, `yAxis`, or `grid`. The Bar3D heatmap fallback colors by Z, while Scatter2D colors by `ColorValue`. Data and Auto Apply merge series/legend/visualMap without rebuilding `grid3D`, preserving the user's camera. Ordinary category Apply creates a union label domain; duplicate X values in one series use the last value. Category streaming preserves repeated labels in append order.
 
+`Set 2D Point Window` is disabled by default and clamps Max Points to 1–100000. Each non-streaming Numeric2D/Category series (0–3) owns an independent fixed-capacity true ring: enabling or shrinking keeps its newest N points immediately; Add/Append overwrite the oldest point in stable logical order; Set and sorted DataTable snapshots keep their suffix. `Reset 2D Point Window` restores Disabled/1000. Disable/Reset preserves the current points and permits later growth, but discarded points are never recovered. No mouse drag, wheel handler, or `dataZoom` is installed; the payload contains only the retained cache and value/category axes automatically rescale to it.
+
+Data3D is completely unaffected: the node never trims, converts, or changes X/Y/Z/ColorValue/SymbolSizeValue, and the existing global 100000-point limit remains strict. During Preparing/Playing/Paused, DataTable Time Series Series 0 is controlled **exclusively** by the existing Time Series Window; the two limits are not combined with `min`. Ordinary 2D Series 1–3 remain under the 2D point window. After Stop/Completed, Series 0 returns to the ordinary 2D policy and submits a final full payload.
+
+Blueprint example: `Set 2D Point Window(true, 100)` → `Set Auto Apply Enabled(true, 10)` → repeatedly call `Add Data Point(0, Elapsed, FPS)`.
+
 ### Legend settings
 
 `Set Legend Settings(Settings)` and `Reset Legend Settings()` are under `ECharts|Legend`. `FEChartsLegendSettings` defaults to visible, Auto position/orientation, font size 12, gap 10, icon 25×14, and Custom X/Y 50%/5%. C++ clamps these values again. Auto uses a centered horizontal top legend at widths ≥720 CSS px and a vertical right legend below that threshold. Top/Bottom/Left/Right/Custom and Horizontal/Vertical provide explicit overrides. Settings are transactional: Blueprint Read Only state changes only after a successful `On Legend Settings Applied` ACK; failure preserves last-good settings. The latest requested candidate is cached during Loading and replayed after Release/Rebuild without Tick or polling. Blueprint legend settings remain the final override even when CustomOption supplies its own legend object or array.
 
-There is no history database, playback cache, or `Set History Capacity` API. The Time Series window is only the current in-memory visible ring.
+There is no history database, playback cache, or `Set History Capacity` API. Both point-window APIs retain only their current in-memory window; keep long-term history in the game's own data layer.
 
 ### Interaction
 

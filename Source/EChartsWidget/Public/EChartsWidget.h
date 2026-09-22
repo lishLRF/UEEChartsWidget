@@ -143,6 +143,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Add Category Data Point"))
 	bool AddCategoryDataPoint(int32 SeriesIndex, const FString& X, double Y);
 
+	/** Keeps only the newest points of each non-streaming 2D series. Data3D is never affected. */
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Set 2D Point Window"))
+	void Set2DPointWindow(bool bEnabled, int32 MaxPoints = 1000);
+
+	/** Restores the disabled/1000 defaults without recovering points already discarded. */
+	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Reset 2D Point Window"))
+	void Reset2DPointWindow();
+
 	UFUNCTION(BlueprintCallable, Category = "ECharts|Data", meta = (DisplayName = "Set Series Data"))
 	bool SetSeriesData(int32 SeriesIndex, const TArray<FEChartsDataPoint2D>& Data);
 
@@ -232,6 +240,12 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data")
 	float MaxUpdatesPerSecond = 10.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data")
+	bool b2DPointWindowEnabled = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "ECharts|Data", meta = (ClampMin = "1", ClampMax = "100000"))
+	int32 Max2DPointWindowPoints = 1000;
 
 	/** Broadcast once when the current generation reports Ready. */
 	UPROPERTY(BlueprintAssignable, Category = "ECharts|Event")
@@ -337,7 +351,10 @@ private:
 	void PrepareAutomaticRebuild();
 	bool IsValidSeriesIndex(int32 SeriesIndex) const;
 	bool IsGameThreadMutation() const;
-	bool CanReplacePointCount(int32 SeriesIndex, int32 NewSeriesPointCount) const;
+	bool CanReplacePointCount(int32 SeriesIndex, int32 NewSeriesPointCount, EEChartsSeriesDataType NewType) const;
+	int32 GetSeriesPointLimit(int32 SeriesIndex, EEChartsSeriesDataType Type) const;
+	bool ApplyConfiguredRing(int32 SeriesIndex);
+	bool HasActive2DPointWindow() const;
 	void MarkDataChanged();
 	void ReportDataError(const FString& Message);
 	void SubmitLatestData();

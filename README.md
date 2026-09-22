@@ -20,7 +20,7 @@ ECharts Widget 是面向 **Unreal Engine 5.6 / Win64** 的离线 UMG 图表插�
 | 数据入口 | Blueprint 数值/分类/3D、DataTable 快照、DataTable 时序流、Option JSON、可信 Raw JavaScript |
 | 硬限制 | 4 个系列（0–3）、总计 100000 点、数据/Option JSON 16 MiB、Raw JavaScript 1 MiB |
 
-插件没有历史数据库、磁盘回放、`Set History Capacity` 或同名功能。Time Series 的 `Time Series Window` 只是内存中的当前可见环形窗口；长期历史应由游戏自己的数据层保存。
+插件没有历史数据库、磁盘回放或 `Set History Capacity`。`Set 2D Point Window` 与 Time Series 都只保留内存中的当前窗口；长期历史应由游戏自己的数据层保存。
 
 ## 2. 安装、替换与打包
 
@@ -156,11 +156,19 @@ On Chart Ready
 | `Set Category Series Data(Series Index, FEChartsCategoryDataPoint[])` | `bool`；原子替换；会停止活动流。 |
 | `Append Category Series Data(Series Index, FEChartsCategoryDataPoint[])` | `bool`；原子追加。 |
 | `Get Category Series Data(Series Index)` | `FEChartsCategoryDataPoint[]`；Pure。 |
+| `Set 2D Point Window(Enabled, Max Points=1000)` | `void`；默认关闭；Max 夹紧 1–100000。对每个非 stream Numeric2D/Category 系列独立保留最新 N 点。 |
+| `Reset 2D Point Window()` | `void`；恢复 Disabled/1000；已删除的旧点不会恢复。 |
 | `Set 3D Data(Series Index, FEChartsDataPoint3D[])` | `bool`；原子替换；会停止活动流。 |
 | `Append 3D Data(Series Index, FEChartsDataPoint3D[])` | `bool`；原子追加。 |
 | `Get 3D Data(Series Index)` | `FEChartsDataPoint3D[]`；Pure。 |
 
 `FEChartsDataPoint3D` 字段是 `X/Y/Z/ColorValue/SymbolSizeValue`，五者均须有限。普通 Category Apply 建立各 Category 系列标签并集；同系列重复 X 最后一个值生效，缺失标签补 `null`。DataTable Time Series 则保留重复标签位置。
+
+二维点数窗口使用固定容量真环：开启或缩小时立即对 Series 0–3 的 Numeric2D/Category 各自取最后 N 点；后续 Add/Append 稳定覆盖最早点，Set/DataTable snapshot 在排序、安装后取 suffix，Get 保持逻辑顺序。删除不可恢复；Disable/Reset 只解除上限，保留当前点并允许后续增长。它不安装 `dataZoom`，不监听鼠标拖动/滚轮；payload 只提交当前缓存，value/category 轴随窗口自动重算。
+
+`Data3D` 完全不受该节点影响：不会裁剪、转换或改变 `X/Y/Z/ColorValue/SymbolSizeValue`，仍严格遵守全局 100000 点限制。DataTable Time Series 的 Series 0 在 Preparing/Playing/Paused 期间由现有 `Time Series Window` **独占控制**，不与二维点数窗口取 min；Series 1–3 的普通二维数据仍受二维窗口控制。流 Stop/Completed 后，Series 0 再恢复普通二维窗口策略并提交最终 full payload。
+
+Blueprint 示例：`Set 2D Point Window(true, 100)` → `Set Auto Apply Enabled(true, 10)` → timer 中持续 `Add Data Point(0, Elapsed, FPS)`。
 
 ### 5.3 系列、坐标轴与提交
 
@@ -201,7 +209,7 @@ On Chart Ready
 
 ### 5.7 状态与事件
 
-核心 Blueprint Read Only：`Current Template`、`Interaction Mode`、`Runtime State`、`Last Error`、`Last Warning`、`Effective Template`、`X Axis Mode`、`Is Dirty`、`Last Applied Revision/Point Count`、`Auto Apply Enabled/Max Updates Per Second`。
+核心 Blueprint Read Only：`Current Template`、`Interaction Mode`、`Runtime State`、`Last Error`、`Last Warning`、`Effective Template`、`X Axis Mode`、`Is Dirty`、`Last Applied Revision/Point Count`、`Auto Apply Enabled/Max Updates Per Second`、`2D Point Window Enabled/Max 2D Point Window Points`。
 
 DataTable 状态：`Idle / Reading / Processing / Applying / Completed / Error / Cancelled`，以及 `Rows Processed/Succeeded/Skipped/Total Rows`、`Last Data Table Error`。
 
@@ -459,7 +467,7 @@ stateDiagram-v2
 
 ### 12.1 实时 2D
 
-Construct 初始化 `SegmentedAreaLine`；Ready 后 `Set Series Name(0,"FPS")`、`Set Auto Apply Enabled(true,10)`；业务 timer 每 0.1 秒 `Add Data Point(0,Elapsed,FPS)`。普通 Add 没有历史容量，需由业务层 Set 有界数组，或使用 DataTable Time Series。
+Construct 初始化 `SegmentedAreaLine`；Ready 后 `Set Series Name(0,"FPS")`、`Set 2D Point Window(true,100)`、`Set Auto Apply Enabled(true,10)`；业务 timer 每 0.1 秒 `Add Data Point(0,Elapsed,FPS)`。缓存和画面始终只保留最新 100 点。
 
 ### 12.2 分类重复标签
 
@@ -536,7 +544,7 @@ Loop 不清空，首行继续追加；`Streamed Rows` 是累计数，`Current Ro
 
 **Error 事件触发但仍 Ready？** 数据校验复用该事件；只有终止宿主 Error 才将当前世代置 Error。
 
-**有历史回放/Set History Capacity 吗？** 没有；Time Series Window 仅当前可见环。
+**有历史回放/Set History Capacity 吗？** 没有。普通二维 Add/Append 可用 `Set 2D Point Window` 保留最新 N 点；Time Series Window 只控制活动 DataTable stream 的 Series 0。两者都不是长期历史。
 
 **JSON 能写 formatter 函数吗？** 不能；确需函数只能使用经审查的常量 Raw JS，并承担第 9.2 节风险。
 

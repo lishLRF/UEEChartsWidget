@@ -327,6 +327,18 @@
           updateAxis(option, 'yAxis', { type: 'value' });
         }
         if (!option.grid) option.grid = { left: 58, right: 24, top: 42, bottom: 44 };
+        if (payload.pointWindow2D === true) {
+          ['xAxis', 'yAxis'].forEach(function (key) {
+            const axes = Array.isArray(option[key]) ? option[key] : [option[key]];
+            axes.forEach(function (axis) {
+              if (axis && axis.type === 'value') {
+                delete axis.min;
+                delete axis.max;
+                if (key === 'xAxis') axis.scale = true;
+              }
+            });
+          });
+        }
       }
       if (currentEffectiveTemplate === 'Bar3DHeightMap' &&
           payload.series.some(function (series) { return series.type === 'data3D'; })) {

@@ -188,9 +188,11 @@ void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 	const auto Axis = S->bCategory ? EEChartsXAxisMode::Category : EEChartsXAxisMode::ShowAll;
 	const bool bCategory = S->bCategory;
 	const bool b3D = S->b3D;
+	const bool bSkipPrebuiltPayload = b2DPointWindowEnabled && !b3D;
 	const auto Order = S->Mapping.Order;
 	const TWeakObjectPtr<UEChartsWidget> WeakThis(this);
-	Async(EAsyncExecution::ThreadPool, [WeakThis, Request, Rows = MoveTemp(S->Rows), bCategory, b3D, Order,
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Request, Rows = MoveTemp(S->Rows), bCategory, b3D,
+	                                       bSkipPrebuiltPayload, Order,
 	                                       Series = MoveTemp(Series), BaseRevision, Revision, Template, Axis]() mutable
 	{
 		const FString Name = Series[0].Name;
@@ -198,7 +200,10 @@ void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 		Series[0].Name = Name;
 		FString Payload, Error;
 		int32 Count = 0;
-		FEChartsPayloadBuilder::BuildBase64Payload(Template, Axis, Series, Revision, Payload, Count, Error);
+		if (!bSkipPrebuiltPayload)
+		{
+			FEChartsPayloadBuilder::BuildBase64Payload(Template, Axis, Series, Revision, Payload, Count, Error);
+		}
 		AsyncTask(ENamedThreads::GameThread,
 		    [WeakThis, Request, BaseRevision, Revision, Template, Axis, Result = MoveTemp(Series[0]),
 		        Payload = MoveTemp(Payload), Error = MoveTemp(Error)]() mutable
@@ -206,7 +211,11 @@ void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 			UEChartsWidget* W = WeakThis.Get();
 			if (!W || W->DataTableRequest != Request || W->DataTableLoadState != EEChartsDataTableLoadState::Processing)
 				return;
-			if (!Error.IsEmpty())
+			const bool bWindowed2DInstall = W->b2DPointWindowEnabled &&
+				(Result.Type == EEChartsSeriesDataType::Numeric2D || Result.Type == EEChartsSeriesDataType::Category);
+			const bool bRecoverablePrebuiltLimit = Error.Contains(TEXT("point limit")) ||
+				Error.Contains(TEXT("byte JSON safety limit")) || Error.Contains(TEXT("payload is"));
+			if (!Error.IsEmpty() && !(bWindowed2DInstall && bRecoverablePrebuiltLimit))
 			{
 				W->FailDataTableLoad(Error);
 				return;
@@ -251,7 +260,8 @@ void UEChartsWidget::ProcessDataTableSnapshot(uint64 Request)
 				return;
 			}
 			W->DataTableApplyRevision = Revision;
-			W->DataTablePayloadBase64 = MoveTemp(Payload);
+			if (W->HasActive2DPointWindow()) W->DataTablePayloadBase64.Reset();
+			else W->DataTablePayloadBase64 = MoveTemp(Payload);
 			W->DataTableLoadState = EEChartsDataTableLoadState::Applying;
 			W->ApplyEChartsChanges();
 			if (W->bOptionBarrierActive) W->SendPendingOrCachedOption();

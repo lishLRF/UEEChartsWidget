@@ -483,16 +483,19 @@ bool FEChartsStreamingRingBufferTest::RunTest(const FString& Parameters)
     Series.ConfigureRing(FEChartsPayloadBuilder::MaxPointCount);
     const FEChartsDataPoint2D* StableData = Series.Numeric2D.GetData();
     const SIZE_T StableAllocatedBytes = Series.Numeric2D.GetAllocatedSize();
-    for (int32 I = 0; I < FEChartsPayloadBuilder::MaxPointCount; ++I)
+    for (int32 Round = 0; Round < 3; ++Round)
     {
-        Series.AddNumericRing({double(I + FEChartsPayloadBuilder::MaxPointCount), double(I)});
+        for (int32 I = 0; I < FEChartsPayloadBuilder::MaxPointCount; ++I)
+        {
+            Series.AddNumericRing({double(I + (Round + 1) * FEChartsPayloadBuilder::MaxPointCount), double(I)});
+        }
     }
     TestEqual(TEXT("Logical 100k window stays exact"), Series.Num(), FEChartsPayloadBuilder::MaxPointCount);
     TestEqual(TEXT("True ring physical count equals capacity"), Series.PhysicalNum(), FEChartsPayloadBuilder::MaxPointCount);
     TestTrue(TEXT("True ring keeps the underlying allocation pointer stable"), Series.Numeric2D.GetData() == StableData);
     TestEqual(TEXT("True ring keeps allocated bytes stable"), Series.Numeric2D.GetAllocatedSize(), StableAllocatedBytes);
     TestEqual(TEXT("Logical head hides the stale prefix"), Series.NumericAt(0).X,
-        double(FEChartsPayloadBuilder::MaxPointCount));
+        double(3 * FEChartsPayloadBuilder::MaxPointCount));
     FEChartsSeriesData Delta; Delta.Type = EEChartsSeriesDataType::Numeric2D; Delta.Numeric2D.Add({200000.0, 1.0});
     FString Base64, Error;
     TestTrue(TEXT("Single-point delta serializes"), FEChartsPayloadBuilder::BuildStreamDeltaBase64(

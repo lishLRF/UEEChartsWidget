@@ -349,6 +349,85 @@ test('applyDataBase64 maps numeric, category, and 3D series without evaluating d
   assert.ok(state.logs.includes('__UE_ECHARTS_APPLIED__:7:42:5'));
 });
 
+test('2D point-window payload replaces data and restores automatic value-axis scaling', () => {
+  const state = createHostContext();
+  let appliedOption;
+  state.window.UEEChartsTemplates.createTemplate = () => ({
+    requestedTemplate: 'SegmentedAreaLine',
+    effectiveTemplate: 'SegmentedAreaLine',
+    option: {
+      xAxis: { type: 'value', min: -999, max: 999 },
+      yAxis: { type: 'value', min: -999, max: 999 },
+      series: [{ type: 'line', data: [[-999, -999]] }]
+    }
+  });
+  state.window.echarts.init = () => ({
+    clear() {}, resize() {}, dispose() {},
+    setOption(option) { appliedOption = option; },
+    getOption() { return appliedOption || {}; }
+  });
+  vm.runInContext(hostSource, state.context);
+  state.window.UEEChartsHost.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload({
+    revision: 1,
+    template: 'SegmentedAreaLine',
+    xAxisMode: 'ShowAll',
+    pointWindow2D: true,
+    series: [{ index: 0, name: 'Latest', type: 'numeric2D', data: [[10, 20], [30, 40]] }]
+  })), true);
+  assert.equal(JSON.stringify(appliedOption.series[0].data), JSON.stringify([[10, 20], [30, 40]]));
+  assert.equal(appliedOption.xAxis.type, 'value');
+  assert.equal(appliedOption.yAxis.type, 'value');
+  assert.equal(Object.hasOwn(appliedOption.xAxis, 'min'), false);
+  assert.equal(Object.hasOwn(appliedOption.xAxis, 'max'), false);
+  assert.equal(Object.hasOwn(appliedOption.yAxis, 'min'), false);
+  assert.equal(Object.hasOwn(appliedOption.yAxis, 'max'), false);
+  assert.equal(Object.hasOwn(appliedOption, 'dataZoom'), false);
+
+  assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload({
+    revision: 2,
+    template: 'SegmentedAreaLine',
+    xAxisMode: 'Category',
+    pointWindow2D: true,
+    series: [{ index: 0, name: 'Latest', type: 'category', data: [['C', 3], ['D', 4]] }]
+  })), true);
+  assert.deepEqual(Array.from(appliedOption.xAxis.data), ['C', 'D']);
+  assert.deepEqual(Array.from(appliedOption.series[0].data), [3, 4]);
+  assert.equal(Object.hasOwn(appliedOption.yAxis, 'min'), false);
+  assert.equal(Object.hasOwn(appliedOption.yAxis, 'max'), false);
+  assert.equal(Object.hasOwn(appliedOption, 'dataZoom'), false);
+});
+
+test('2D point-window numeric x-axis extent follows each retained window', () => {
+  const state = createHostContext();
+  const chart = echarts.init(null, null, { renderer: 'svg', ssr: true, width: 640, height: 400 });
+  state.window.UEEChartsTemplates.createTemplate = () => ({
+    requestedTemplate: 'SegmentedAreaLine',
+    effectiveTemplate: 'SegmentedAreaLine',
+    option: { xAxis: { type: 'value' }, yAxis: { type: 'value' }, series: [{ type: 'line', data: [] }] }
+  });
+  state.window.echarts.init = () => chart;
+  try {
+    vm.runInContext(hostSource, state.context);
+    state.window.UEEChartsHost.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+    const apply = (revision, data) => state.window.UEEChartsHost.applyDataBase64(encodePayload({
+      revision, template: 'SegmentedAreaLine', xAxisMode: 'ShowAll', pointWindow2D: true,
+      series: [{ index: 0, name: 'Latest', type: 'numeric2D', data }]
+    }));
+
+    assert.equal(apply(1, [[100, 1], [101, 2], [102, 3]]), true);
+    const first = chart.getModel().getComponent('xAxis', 0).axis.scale.getExtent();
+    assert.ok(first[0] >= 90 && first[1] <= 110, `first extent must follow 100..102, got ${first}`);
+    assert.equal(apply(2, [[200, 4], [201, 5], [202, 6]]), true);
+    const second = chart.getModel().getComponent('xAxis', 0).axis.scale.getExtent();
+    assert.ok(second[0] >= 190 && second[1] <= 210, `second extent must follow 200..202, got ${second}`);
+    assert.ok(second[0] > first[1], `second window must not retain the first extent: ${first} -> ${second}`);
+  } finally {
+    chart.dispose();
+  }
+});
+
 test('applyDataBase64 rejects malformed Base64 and JSON with an ERROR marker', () => {
   const state = createHostContext();
   vm.runInContext(hostSource, state.context);

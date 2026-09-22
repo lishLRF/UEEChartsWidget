@@ -228,7 +228,8 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 	FString& OutBase64,
 	int32& OutPointCount,
 	FString& OutError,
-	const bool bPreserveCategoryOrder)
+	const bool bPreserveCategoryOrder,
+	const bool bPointWindow2D)
 {
 	OutBase64.Reset();
 	OutPointCount = 0;
@@ -247,6 +248,7 @@ bool FEChartsPayloadBuilder::BuildBase64Payload(
 	Root->SetStringField(TEXT("template"), TemplateName(Template));
 	Root->SetStringField(TEXT("xAxisMode"), XAxisModeName(XAxisMode));
 	if (bPreserveCategoryOrder) Root->SetBoolField(TEXT("preserveCategoryOrder"), true);
+	if (bPointWindow2D) Root->SetBoolField(TEXT("pointWindow2D"), true);
 
 	TArray<TSharedPtr<FJsonValue>> JsonSeries;
 	JsonSeries.Reserve(MaxSeriesCount);

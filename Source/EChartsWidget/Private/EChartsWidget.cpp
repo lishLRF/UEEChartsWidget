@@ -37,6 +37,11 @@ namespace
 	constexpr int32 MaxOptionJsonBytes = 16 * 1024 * 1024;
 	constexpr int32 MaxJavaScriptBytes = 1024 * 1024;
 
+	bool Is2DSeriesType(const EEChartsSeriesDataType Type)
+	{
+		return Type == EEChartsSeriesDataType::Numeric2D || Type == EEChartsSeriesDataType::Category;
+	}
+
 	bool TryParseGeneration(const FString& Text, uint64& OutGeneration)
 	{
 		return !Text.IsEmpty() && LexTryParseString(OutGeneration, *Text);
@@ -213,12 +218,43 @@ int32 UEChartsWidget::GetTotalPointCount() const
 	return Total;
 }
 
-bool UEChartsWidget::CanReplacePointCount(const int32 SeriesIndex, const int32 NewSeriesPointCount) const
+int32 UEChartsWidget::GetSeriesPointLimit(const int32 SeriesIndex, const EEChartsSeriesDataType Type) const
 {
-	const int32 BoundedCount = SeriesIndex == 0 && SeriesData[0].RingCapacity > 0 && bTimeSeriesEnabled
-		? FMath::Min(NewSeriesPointCount, TimeSeriesWindow) : NewSeriesPointCount;
-	return IsValidSeriesIndex(SeriesIndex) && NewSeriesPointCount >= 0 &&
+	if (SeriesIndex == 0 && IsStreamingActive()) return TimeSeriesWindow;
+	return Is2DSeriesType(Type) && b2DPointWindowEnabled ? Max2DPointWindowPoints : 0;
+}
+
+bool UEChartsWidget::CanReplacePointCount(
+	const int32 SeriesIndex, const int32 NewSeriesPointCount, const EEChartsSeriesDataType NewType) const
+{
+	if (!IsValidSeriesIndex(SeriesIndex) || NewSeriesPointCount < 0) return false;
+	int32 Limit = GetSeriesPointLimit(SeriesIndex, NewType);
+	if (SeriesIndex == 0 && IsStreamingActive() && SeriesData[0].RingCapacity <= 0) Limit = 0;
+	const int32 BoundedCount = Limit > 0 ? FMath::Min(NewSeriesPointCount, Limit) : NewSeriesPointCount;
+	return
 		GetTotalPointCount() - SeriesData[SeriesIndex].Num() + BoundedCount <= FEChartsPayloadBuilder::MaxPointCount;
+}
+
+bool UEChartsWidget::ApplyConfiguredRing(const int32 SeriesIndex)
+{
+	if (!IsValidSeriesIndex(SeriesIndex)) return false;
+	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
+	const int32 PreviousCount = Series.Num();
+	const int32 Limit = GetSeriesPointLimit(SeriesIndex, Series.Type);
+	if (Limit > 0 && Series.RingCapacity != Limit) Series.ConfigureRing(Limit);
+	else if (Limit <= 0 && Series.RingCapacity > 0) Series.Linearize();
+	return Series.Num() < PreviousCount;
+}
+
+bool UEChartsWidget::HasActive2DPointWindow() const
+{
+	if (!b2DPointWindowEnabled) return false;
+	for (int32 SeriesIndex = 0; SeriesIndex < FEChartsPayloadBuilder::MaxSeriesCount; ++SeriesIndex)
+	{
+		if (SeriesData[SeriesIndex].Num() > 0 && Is2DSeriesType(SeriesData[SeriesIndex].Type) &&
+			!(SeriesIndex == 0 && IsStreamingActive())) return true;
+	}
+	return false;
 }
 
 void UEChartsWidget::ReportDataError(const FString& Message)
@@ -254,6 +290,36 @@ void UEChartsWidget::MarkDataChanged()
 	ScheduleAutoApply();
 }
 
+void UEChartsWidget::Set2DPointWindow(const bool bEnabled, const int32 MaxPoints)
+{
+	if (!IsGameThreadMutation()) return;
+	const bool bEnabledChanged = b2DPointWindowEnabled != bEnabled;
+	b2DPointWindowEnabled = bEnabled;
+	Max2DPointWindowPoints = FMath::Clamp(MaxPoints, 1, FEChartsPayloadBuilder::MaxPointCount);
+	bool bDroppedPoints = false;
+	bool bHasVisible2D = false;
+	for (int32 SeriesIndex = 0; SeriesIndex < FEChartsPayloadBuilder::MaxSeriesCount; ++SeriesIndex)
+	{
+		if (!Is2DSeriesType(SeriesData[SeriesIndex].Type) ||
+			(SeriesIndex == 0 && IsStreamingActive())) continue;
+		bHasVisible2D |= SeriesData[SeriesIndex].Num() > 0;
+		bDroppedPoints |= ApplyConfiguredRing(SeriesIndex);
+	}
+	if (bHasDataTableCacheSnapshot && Is2DSeriesType(DataTablePreviousSeries.Type))
+	{
+		if (b2DPointWindowEnabled && DataTablePreviousSeries.RingCapacity != Max2DPointWindowPoints)
+			DataTablePreviousSeries.ConfigureRing(Max2DPointWindowPoints);
+		else if (!b2DPointWindowEnabled && DataTablePreviousSeries.RingCapacity > 0)
+			DataTablePreviousSeries.Linearize();
+	}
+	if (bDroppedPoints || (bEnabledChanged && bHasVisible2D)) MarkDataChanged();
+}
+
+void UEChartsWidget::Reset2DPointWindow()
+{
+	Set2DPointWindow(false, 1000);
+}
+
 bool UEChartsWidget::AddDataPoint(const int32 SeriesIndex, const double X, const double Y)
 {
 	if (!IsGameThreadMutation() || !IsValidSeriesIndex(SeriesIndex) || !FMath::IsFinite(X) || !FMath::IsFinite(Y))
@@ -265,12 +331,13 @@ bool UEChartsWidget::AddDataPoint(const int32 SeriesIndex, const double X, const
 	{
 		return false;
 	}
-	if (!CanReplacePointCount(SeriesIndex, Series.Num() + 1))
+	if (!CanReplacePointCount(SeriesIndex, Series.Num() + 1, EEChartsSeriesDataType::Numeric2D))
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
 	}
 	Series.Type = EEChartsSeriesDataType::Numeric2D;
+	ApplyConfiguredRing(SeriesIndex);
 	Series.AddNumericRing({X, Y});
 	MarkDataChanged();
 	return true;
@@ -287,12 +354,13 @@ bool UEChartsWidget::AddCategoryDataPoint(const int32 SeriesIndex, const FString
 	{
 		return false;
 	}
-	if (!CanReplacePointCount(SeriesIndex, Series.Num() + 1))
+	if (!CanReplacePointCount(SeriesIndex, Series.Num() + 1, EEChartsSeriesDataType::Category))
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
 	}
 	Series.Type = EEChartsSeriesDataType::Category;
+	ApplyConfiguredRing(SeriesIndex);
 	Series.AddCategoryRing({X, Y});
 	MarkDataChanged();
 	return true;
@@ -305,7 +373,8 @@ bool UEChartsWidget::SetSeriesData(const int32 SeriesIndex, const TArray<FEChart
 	{
 		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y)) return false;
 	}
-	if (GetTotalPointCount() - SeriesData[SeriesIndex].Num() + Data.Num() > FEChartsPayloadBuilder::MaxPointCount)
+	const int32 FinalCount = b2DPointWindowEnabled ? FMath::Min(Data.Num(), Max2DPointWindowPoints) : Data.Num();
+	if (GetTotalPointCount() - SeriesData[SeriesIndex].Num() + FinalCount > FEChartsPayloadBuilder::MaxPointCount)
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
@@ -315,7 +384,11 @@ bool UEChartsWidget::SetSeriesData(const int32 SeriesIndex, const TArray<FEChart
 	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
 	Series.ResetData();
 	Series.Type = EEChartsSeriesDataType::Numeric2D;
-	Series.Numeric2D = Data;
+	const int32 Limit = GetSeriesPointLimit(SeriesIndex, Series.Type);
+	const int32 Keep = Limit > 0 ? FMath::Min(Data.Num(), Limit) : Data.Num();
+	Series.Numeric2D.Reserve(Limit > 0 ? Limit : Keep);
+	if (Keep > 0) Series.Numeric2D.Append(Data.GetData() + Data.Num() - Keep, Keep);
+	if (Limit > 0) Series.ConfigureRing(Limit);
 	if (SeriesIndex == 0) bPreserveStreamCategoryOrder = false;
 	MarkDataChanged();
 	if (bStopped) OnDataTableStreamingStopped.Broadcast();
@@ -330,7 +403,7 @@ bool UEChartsWidget::AppendSeriesData(const int32 SeriesIndex, const TArray<FECh
 	{
 		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y)) return false;
 	}
-	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num()))
+	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num(), EEChartsSeriesDataType::Numeric2D))
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
@@ -338,6 +411,7 @@ bool UEChartsWidget::AppendSeriesData(const int32 SeriesIndex, const TArray<FECh
 	if (!Data.IsEmpty())
 	{
 		SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Numeric2D;
+		ApplyConfiguredRing(SeriesIndex);
 		for (const FEChartsDataPoint2D& Point : Data) SeriesData[SeriesIndex].AddNumericRing(Point);
 		MarkDataChanged();
 	}
@@ -360,7 +434,8 @@ bool UEChartsWidget::SetCategorySeriesData(const int32 SeriesIndex, const TArray
 	{
 		if (Point.X.TrimStartAndEnd().IsEmpty() || !FMath::IsFinite(Point.Y)) return false;
 	}
-	if (GetTotalPointCount() - SeriesData[SeriesIndex].Num() + Data.Num() > FEChartsPayloadBuilder::MaxPointCount)
+	const int32 FinalCount = b2DPointWindowEnabled ? FMath::Min(Data.Num(), Max2DPointWindowPoints) : Data.Num();
+	if (GetTotalPointCount() - SeriesData[SeriesIndex].Num() + FinalCount > FEChartsPayloadBuilder::MaxPointCount)
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
@@ -370,7 +445,11 @@ bool UEChartsWidget::SetCategorySeriesData(const int32 SeriesIndex, const TArray
 	FEChartsSeriesData& Series = SeriesData[SeriesIndex];
 	Series.ResetData();
 	Series.Type = EEChartsSeriesDataType::Category;
-	Series.Category = Data;
+	const int32 Limit = GetSeriesPointLimit(SeriesIndex, Series.Type);
+	const int32 Keep = Limit > 0 ? FMath::Min(Data.Num(), Limit) : Data.Num();
+	Series.Category.Reserve(Limit > 0 ? Limit : Keep);
+	if (Keep > 0) Series.Category.Append(Data.GetData() + Data.Num() - Keep, Keep);
+	if (Limit > 0) Series.ConfigureRing(Limit);
 	if (SeriesIndex == 0) bPreserveStreamCategoryOrder = false;
 	MarkDataChanged();
 	if (bStopped) OnDataTableStreamingStopped.Broadcast();
@@ -385,7 +464,7 @@ bool UEChartsWidget::AppendCategorySeriesData(const int32 SeriesIndex, const TAr
 	{
 		if (Point.X.TrimStartAndEnd().IsEmpty() || !FMath::IsFinite(Point.Y)) return false;
 	}
-	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num()))
+	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num(), EEChartsSeriesDataType::Category))
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
@@ -393,6 +472,7 @@ bool UEChartsWidget::AppendCategorySeriesData(const int32 SeriesIndex, const TAr
 	if (!Data.IsEmpty())
 	{
 		SeriesData[SeriesIndex].Type = EEChartsSeriesDataType::Category;
+		ApplyConfiguredRing(SeriesIndex);
 		for (const FEChartsCategoryDataPoint& Point : Data) SeriesData[SeriesIndex].AddCategoryRing(Point);
 		MarkDataChanged();
 	}
@@ -442,7 +522,7 @@ bool UEChartsWidget::Append3DData(const int32 SeriesIndex, const TArray<FECharts
 		if (!FMath::IsFinite(Point.X) || !FMath::IsFinite(Point.Y) || !FMath::IsFinite(Point.Z) ||
 			!FMath::IsFinite(Point.ColorValue) || !FMath::IsFinite(Point.SymbolSizeValue)) return false;
 	}
-	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num()))
+	if (!CanReplacePointCount(SeriesIndex, SeriesData[SeriesIndex].Num() + Data.Num(), EEChartsSeriesDataType::Data3D))
 	{
 		ReportDataError(FString::Printf(TEXT("ECharts data cache exceeds the %d point limit."), FEChartsPayloadBuilder::MaxPointCount));
 		return false;
@@ -576,6 +656,7 @@ void UEChartsWidget::SubmitLatestData()
 	const EEChartsTemplate Template = CurrentTemplate;
 	const EEChartsXAxisMode AxisMode = XAxisMode;
 	const bool bPreserveOrder = bPreserveStreamCategoryOrder;
+	const bool bPointWindow2D = HasActive2DPointWindow();
 	auto Snapshot = SeriesData;
 	bPayloadBuildInFlight = true;
 	PayloadBuildRevision = Revision;
@@ -586,7 +667,7 @@ void UEChartsWidget::SubmitLatestData()
 #endif
 	const TWeakObjectPtr<UEChartsWidget> WeakThis(this);
 	Async(EAsyncExecution::ThreadPool, [WeakThis, BuildRequest, Generation, Revision, Template, AxisMode,
-		bPreserveOrder, Snapshot = MoveTemp(Snapshot)
+		bPreserveOrder, bPointWindow2D, Snapshot = MoveTemp(Snapshot)
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 		, TestGate, ThreadFlag
 #endif
@@ -600,9 +681,11 @@ void UEChartsWidget::SubmitLatestData()
 		FString BuildError;
 		int32 BuiltPointCount = 0;
 		const bool bBuilt = FEChartsPayloadBuilder::BuildBase64Payload(
-			Template, AxisMode, Snapshot, Revision, BuiltPayload, BuiltPointCount, BuildError, bPreserveOrder);
+			Template, AxisMode, Snapshot, Revision, BuiltPayload, BuiltPointCount, BuildError,
+			bPreserveOrder, bPointWindow2D);
 		AsyncTask(ENamedThreads::GameThread, [WeakThis, BuildRequest, Generation, Revision, Template, AxisMode,
-			bPreserveOrder, bBuilt, BuiltPayload = MoveTemp(BuiltPayload), BuildError = MoveTemp(BuildError), BuiltPointCount]() mutable
+			bPreserveOrder, bPointWindow2D, bBuilt, BuiltPayload = MoveTemp(BuiltPayload),
+			BuildError = MoveTemp(BuildError), BuiltPointCount]() mutable
 		{
 			UEChartsWidget* Widget = WeakThis.Get();
 			if (!Widget || Widget->PayloadBuildRequest != BuildRequest) return;
@@ -619,7 +702,8 @@ void UEChartsWidget::SubmitLatestData()
 			}
 			if (Generation != Widget->LoadGeneration || Revision != Widget->DataRevision ||
 				Template != Widget->CurrentTemplate || AxisMode != Widget->XAxisMode ||
-				bPreserveOrder != Widget->bPreserveStreamCategoryOrder)
+				bPreserveOrder != Widget->bPreserveStreamCategoryOrder ||
+				bPointWindow2D != Widget->HasActive2DPointWindow())
 			{
 				Widget->bApplyRequested = true;
 				Widget->SubmitLatestData();
@@ -629,6 +713,8 @@ void UEChartsWidget::SubmitLatestData()
 			{
 				Widget->bApplyRequested = false;
 				if (Widget->IsStreamingActive()) Widget->FailStreaming(BuildError);
+				else if (Widget->DataTableLoadState == EEChartsDataTableLoadState::Applying &&
+					Widget->DataTableApplyRevision == Revision) Widget->FailDataTableLoad(BuildError);
 				else Widget->ReportDataError(BuildError);
 				return;
 			}

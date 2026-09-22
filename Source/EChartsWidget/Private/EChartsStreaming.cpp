@@ -254,7 +254,7 @@ bool UEChartsWidget::StreamStep(uint64 Request)
 	const int32 Added = End - CurrentRow;
 	const int32 DropCount = FMath::Max(0, Target.Num() + Added - TimeSeriesWindow);
 	const int32 Capacity = FMath::Min(TimeSeriesWindow, Target.Num() + Added);
-	if (!CanReplacePointCount(0, Capacity)) { FailStreaming(TEXT("Stream exceeds the chart point limit across all series.")); return Finish(false); }
+	if (!CanReplacePointCount(0, Capacity, Target.Type)) { FailStreaming(TEXT("Stream exceeds the chart point limit across all series.")); return Finish(false); }
 	for (; CurrentRow < End; ++CurrentRow)
 	{
 		switch (Target.Type)
@@ -331,8 +331,16 @@ void UEChartsWidget::StopStreaming(bool bNotify)
 	StreamFinalRevision = 0;
 	bStreamProductionComplete = false;
 	PreparedStreamRows = {};
-	SeriesData[0].Linearize();
+	const bool bRestore2DWindow = b2DPointWindowEnabled &&
+		(SeriesData[0].Type == EEChartsSeriesDataType::Numeric2D || SeriesData[0].Type == EEChartsSeriesDataType::Category) &&
+		SeriesData[0].Num() > 0;
+	const bool bDroppedFor2DWindow = ApplyConfiguredRing(0);
 	InvalidateStreamDelta();
+	if (bActive && (bRestore2DWindow || bDroppedFor2DWindow))
+	{
+		MarkDataChanged();
+		if (bNotify) ApplyEChartsChanges();
+	}
 	if (bPreparing || (DataTableSnapshot && DataTableSnapshot->bStreaming)) StopDataTableLoad(false);
 	if (bActive && bNotify) OnDataTableStreamingStopped.Broadcast();
 }
@@ -372,8 +380,16 @@ void UEChartsWidget::CompleteStreamIfAcknowledged(int64 Revision)
 	CancelStreamTicker();
 	StreamFinalRevision = 0;
 	PreparedStreamRows = {};
-	SeriesData[0].Linearize();
 	StreamState = EEChartsDataTableStreamState::Completed;
+	const bool bRestore2DWindow = b2DPointWindowEnabled &&
+		(SeriesData[0].Type == EEChartsSeriesDataType::Numeric2D || SeriesData[0].Type == EEChartsSeriesDataType::Category) &&
+		SeriesData[0].Num() > 0;
+	const bool bDroppedFor2DWindow = ApplyConfiguredRing(0);
+	if (bRestore2DWindow || bDroppedFor2DWindow)
+	{
+		MarkDataChanged();
+		ApplyEChartsChanges();
+	}
 	OnDataTableStreamingCompleted.Broadcast();
 }
 
