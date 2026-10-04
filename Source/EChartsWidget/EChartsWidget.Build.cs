@@ -24,6 +24,8 @@ public class EChartsWidget : ModuleRules
 		if (Target.bBuildEditor)
 		{
 			PrivateDependencyModuleNames.Add("HTTP");
+			PrivateDependencyModuleNames.Add("UnrealEd");
+			PrivateDependencyModuleNames.Add("BlueprintGraph");
 		}
 
 		AddRuntimeDependenciesForDirectory("Resources/Web");

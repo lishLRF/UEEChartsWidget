@@ -6,6 +6,15 @@
 
 namespace
 {
+const FProperty* ResolveColumn(const UDataTable* Table, const FName Name)
+{
+	if (!Table || !Table->GetRowStruct() || Name.IsNone()) return nullptr;
+	const UScriptStruct* Struct = Table->GetRowStruct();
+	if (const FProperty* Property = FindFProperty<FProperty>(Struct, Name)) return Property;
+	// Blueprint-authored Structure fields have generated internal names, while Mapping uses the visible column name.
+	return Struct->CustomFindProperty(Name);
+}
+
 EEChartsDataTableColumnType Classify(const FProperty* Property)
 {
 	if (!Property || Property->ArrayDim != 1)
@@ -75,7 +84,8 @@ bool EChartsDataTableLoader::Columns(UDataTable* Table, TArray<FEChartsDataTable
 	for (TFieldIterator<FProperty> It(Table->GetRowStruct()); It; ++It)
 	{
 		FEChartsDataTableColumn C;
-		C.Name = It->GetFName();
+		const FString AuthoredName = It->GetAuthoredName();
+		C.Name = AuthoredName.IsEmpty() ? It->GetFName() : FName(*AuthoredName);
 		C.ColumnType = Classify(*It);
 		C.bCanUseAsNumeric = C.ColumnType == EEChartsDataTableColumnType::Numeric;
 		C.bCanUseAsX = C.ColumnType != EEChartsDataTableColumnType::Unsupported;
@@ -94,7 +104,7 @@ bool EChartsDataTableLoader::Validate(
 		return false;
 	}
 	const bool b3D = Template == EEChartsTemplate::Bar3DHeightMap || Template == EEChartsTemplate::DataTableScatter3D;
-	auto Type = [Table](FName Name) { return Classify(FindFProperty<FProperty>(Table->GetRowStruct(), Name)); };
+	auto Type = [Table](FName Name) { return Classify(ResolveColumn(Table, Name)); };
 	const auto XType = Type(M.X);
 	bCategory = XType == EEChartsDataTableColumnType::Category;
 	if (M.X.IsNone() || XType == EEChartsDataTableColumnType::Unsupported || (b3D && bCategory))
@@ -128,7 +138,7 @@ bool EChartsDataTableLoader::ReadRow(
 	if (!Found || !*Found)
 		return false;
 	const uint8* Row = *Found;
-	auto Prop = [Table](FName Name) { return FindFProperty<FProperty>(Table->GetRowStruct(), Name); };
+	auto Prop = [Table](FName Name) { return ResolveColumn(Table, Name); };
 	Out.RowKey = RowName;
 	Out.RowName = RowName.GetPlainNameString();
 	Out.RowNameNumber = RowName.GetNumber();
@@ -168,7 +178,7 @@ bool EChartsDataTableLoader::ReadSortKey(
 	}
 	const uint8* const* Found = Table->GetRowMap().Find(RowName);
 	if (!Found || !*Found) return true;
-	const FProperty* X = FindFProperty<FProperty>(Table->GetRowStruct(), S.Mapping.X);
+	const FProperty* X = ResolveColumn(Table, S.Mapping.X);
 	if (S.bCategory)
 	{
 		if (const FStrProperty* StringProperty = CastField<FStrProperty>(X))

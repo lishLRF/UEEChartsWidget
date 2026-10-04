@@ -266,6 +266,8 @@ Stream 状态：`Stopped / Preparing / Playing / Paused / Completed / Error`，�
 
 `XAscending` 稳定排序：numeric X 升序，Category 大小写敏感词法序；相同 key 保持读取顺序。`RowName` 按 FName plain name（忽略大小写）和 number 后缀排序，如 `Row_2` 可在 `Row_10` 前。
 
+如果 DataTable 使用蓝图自建的 Structure，映射中填写编辑器显示的列名（例如 `X`、`Y`）即可。插件也接受旧工程中保存的带编号/GUID 的内部列名。可先用 `Get ECharts DataTable Columns` 查看当前可映射列及类型；Y 必须是数值列。
+
 ### 6.3 C++ 行示例
 
 此 struct 放在游戏模块中，无需修改插件：
@@ -298,14 +300,17 @@ struct FTelemetryChartRow : public FTableRowBase
 ### 6.4 Blueprint 快照顺序
 
 ```text
-Initialize ECharts(2D 或 3D 模板)
-  → Get ECharts DataTable Columns(Table)
-  → 检查 Columns / Out Error
-  → Make FEChartsDataTableMapping
-  → Set DataTable Mapping(Table, Mapping)
-  → Load Data Table(256)
-  → On Data Table Load Progress
-  → On Data Table Loaded(Succeeded, Skipped)
+Event Construct
+  → 先 Bind Event to On Chart Ready / On Data Table Loaded / On ECharts Error
+  → Initialize ECharts(SegmentedAreaLine)
+On Chart Ready
+  → Get ECharts DataTable Columns(Table)（可选，用于核对列名/类型）
+  → Make ECharts Data Table Mapping(X="X", Y="Y", 其余留空)
+  → Set Data Table Mapping(Table, Mapping)
+  → Branch(Return Value)
+      True  → Load Data Table(256)
+      False → 读取 Last Data Table Error，核对列名和类型
+On Data Table Loaded(Succeeded, Skipped)
 ```
 
 空 Category、NaN/Infinity、缺失行或任一映射转换失败的行会跳过。`Processed = Succeeded + Skipped`。快照替换 Series 0、保留 Series 1–3，并设 `Category` 或 `ShowAll` 轴；即使 Auto Apply 关闭也会提交。Loaded 等浏览器 ACK，不只是 worker 完成。

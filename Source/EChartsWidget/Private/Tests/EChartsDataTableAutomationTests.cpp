@@ -8,12 +8,72 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#if WITH_EDITOR
+#include "Kismet2/StructureEditorUtils.h"
+#include "EdGraphSchema_K2.h"
+#include "StructUtils/UserDefinedStruct.h"
+#include "UserDefinedStructure/UserDefinedStructEditorData.h"
+#endif
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UnrealType.h"
 #include "Widgets/SWidget.h"
 #include <limits>
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsFriendlyDataTableColumnsTest,
+    "EChartsWidget.DataTable.BlueprintStructureColumnNames",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FEChartsFriendlyDataTableColumnsTest::RunTest(const FString& Parameters)
+{
+	UUserDefinedStruct* RowStruct = FStructureEditorUtils::CreateUserDefinedStruct(
+		GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(), UUserDefinedStruct::StaticClass(), TEXT("EChartsXYTestRow")), RF_Transient);
+	if (!TestNotNull(TEXT("Blueprint Structure created"), RowStruct)) return false;
+	const FEdGraphPinType DoubleType(UEdGraphSchema_K2::PC_Real, UEdGraphSchema_K2::PC_Double,
+		nullptr, EPinContainerType::None, false, FEdGraphTerminalType());
+	const FGuid XGuid = FStructureEditorUtils::GetVarDesc(RowStruct)[0].VarGuid;
+	TestTrue(TEXT("X is numeric"), FStructureEditorUtils::ChangeVariableType(RowStruct, XGuid, DoubleType));
+	TestTrue(TEXT("X is named"), FStructureEditorUtils::RenameVariable(RowStruct, XGuid, TEXT("X")));
+	TestTrue(TEXT("Y is added"), FStructureEditorUtils::AddVariable(RowStruct, DoubleType));
+	const FGuid YGuid = FStructureEditorUtils::GetVarDesc(RowStruct).Last().VarGuid;
+	TestTrue(TEXT("Y is named"), FStructureEditorUtils::RenameVariable(RowStruct, YGuid, TEXT("Y")));
+	const FName InternalX = FStructureEditorUtils::GetVarDesc(RowStruct)[0].VarName;
+	const FName InternalY = FStructureEditorUtils::GetVarDesc(RowStruct)[1].VarName;
+	TestEqual(TEXT("Blueprint X authored name"), RowStruct->FindPropertyByName(InternalX)->GetAuthoredName(), FString(TEXT("X")));
+	UDataTable* Table = NewObject<UDataTable>();
+	Table->RowStruct = RowStruct;
+	UEChartsWidget* Widget = NewObject<UEChartsWidget>();
+	TArray<FEChartsDataTableColumn> Columns;
+	FString Error;
+	TestTrue(TEXT("Blueprint structure columns can be listed"), Widget->GetEChartsDataTableColumns(Table, Columns, Error));
+	TestEqual(TEXT("Two visible columns"), Columns.Num(), 2);
+	if (Columns.Num() == 2)
+	{
+		TestTrue(TEXT("Visible X is discoverable"), Columns.ContainsByPredicate([](const FEChartsDataTableColumn& C) { return C.Name == TEXT("X") && C.bCanUseAsNumeric; }));
+		TestTrue(TEXT("Visible Y is discoverable"), Columns.ContainsByPredicate([](const FEChartsDataTableColumn& C) { return C.Name == TEXT("Y") && C.bCanUseAsNumeric; }));
+	}
+	FEChartsDataTableMapping Mapping;
+	Mapping.X = TEXT("X");
+	Mapping.Y = TEXT("Y");
+	TestTrue(TEXT("Visible Blueprint X/Y map as numeric 2D"), Widget->SetDataTableMapping(Table, Mapping));
+	FStructOnScope Row(RowStruct);
+	CastFieldChecked<FDoubleProperty>(RowStruct->FindPropertyByName(InternalX))
+		->SetPropertyValue_InContainer(Row.GetStructMemory(), 3.5);
+	CastFieldChecked<FDoubleProperty>(RowStruct->FindPropertyByName(InternalY))
+		->SetPropertyValue_InContainer(Row.GetStructMemory(), 7.25);
+	Table->AddRow(TEXT("Sample"), Row.GetStructMemory(), RowStruct);
+	FEChartsDataTableSnapshot Snapshot;
+	Snapshot.Mapping = Mapping;
+	FEChartsDataTableRow Out;
+	TestTrue(TEXT("Blueprint X/Y row is readable"), EChartsDataTableLoader::ReadRow(Table, TEXT("Sample"), Snapshot, Out));
+	TestEqual(TEXT("Blueprint X value"), Out.Point.X, 3.5);
+	TestEqual(TEXT("Blueprint Y value"), Out.Point.Y, 7.25);
+	Mapping.X = InternalX;
+	Mapping.Y = InternalY;
+	TestTrue(TEXT("Existing internal-name mappings remain accepted"), Widget->SetDataTableMapping(Table, Mapping));
+	Widget->ReleaseSlateResources(false);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsDataTableContractTest, "EChartsWidget.DataTable.BlueprintContract",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FEChartsDataTableContractTest::RunTest(const FString& Parameters)

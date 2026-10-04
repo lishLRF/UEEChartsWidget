@@ -144,12 +144,20 @@ Date text in String/Name/Text is a category label; it is not parsed. Use numeric
 
 `FEChartsDataTableMapping` fields are `X, Y, Z, Color, SymbolSize, Order`. 2D requires supported X and numeric Y. 3D requires numeric X/Y/Z; Color and SymbolSize are optional numeric fields. Defaults are `ColorValue=Z` and `SymbolSizeValue=12`. `XAscending` is stable numeric ascending or case-sensitive category lexical order; `RowName` follows FName plain-name/number ordering.
 
+For a Blueprint-authored Structure, enter the visible column names shown in the DataTable (for example `X` and `Y`). Existing mappings using generated internal names remain valid. `Get ECharts DataTable Columns` lists the names and types that can be mapped.
+
 ```text
-Get ECharts DataTable Columns(Table)
-  -> Set DataTable Mapping(Table, Mapping)
-  -> Load Data Table(Rows Per Frame=256)
-  -> progress
-  -> On Data Table Loaded(Succeeded, Skipped)
+Event Construct
+  -> bind On Chart Ready / On Data Table Loaded / On ECharts Error
+  -> Initialize ECharts(SegmentedAreaLine)
+On Chart Ready
+  -> Get ECharts DataTable Columns(Table) (optional type/name check)
+  -> Make ECharts Data Table Mapping(X="X", Y="Y", other fields empty)
+  -> Set Data Table Mapping(Table, Mapping)
+  -> Branch(Return Value)
+       true  -> Load Data Table(Rows Per Frame=256)
+       false -> inspect Last Data Table Error and the mapped column types
+On Data Table Loaded(Succeeded, Skipped)
 ```
 
 `Rows Per Frame` is clamped to 1–4096. Invalid rows (blank category, missing data, NaN/Infinity, conversion failure) are skipped and counted. Snapshot load replaces Series 0, keeps Series 1–3, and automatically Applies even when Auto Apply is off. Completion waits for the exact browser ACK.
