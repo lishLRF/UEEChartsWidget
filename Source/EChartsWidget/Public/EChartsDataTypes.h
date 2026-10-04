@@ -108,6 +108,53 @@ struct ECHARTSWIDGET_API FEChartsLegendSettings
 	bool operator!=(const FEChartsLegendSettings& Other) const { return !(*this == Other); }
 };
 
+UENUM(BlueprintType)
+enum class EEChartsAxisId : uint8 { X2D, Y2D, X3D, Y3D, Z3D };
+
+UENUM(BlueprintType)
+enum class EEChartsAxisNameLocation : uint8 { Start, Middle, End };
+
+UENUM(BlueprintType)
+enum class EEChartsXAxisSide : uint8 { Auto, Top, Bottom };
+
+UENUM(BlueprintType)
+enum class EEChartsYAxisSide : uint8 { Auto, Left, Right };
+
+USTRUCT(BlueprintType)
+struct ECHARTSWIDGET_API FEChartsAxisTitleSettings
+{
+	GENERATED_BODY()
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") bool bOverride = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") FString Name;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") EEChartsAxisNameLocation Location = EEChartsAxisNameLocation::Middle;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis", meta = (ClampMin = "0.0", ClampMax = "200.0")) float Gap = 20.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis", meta = (ClampMin = "6", ClampMax = "72")) int32 FontSize = 16;
+	bool operator==(const FEChartsAxisTitleSettings& Other) const
+	{
+		return bOverride == Other.bOverride && Name == Other.Name && Location == Other.Location && Gap == Other.Gap && FontSize == Other.FontSize;
+	}
+	bool operator!=(const FEChartsAxisTitleSettings& Other) const { return !(*this == Other); }
+};
+
+USTRUCT(BlueprintType)
+struct ECHARTSWIDGET_API FEChartsAxisSettings
+{
+	GENERATED_BODY()
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") FEChartsAxisTitleSettings X2D;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") FEChartsAxisTitleSettings Y2D;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") FEChartsAxisTitleSettings X3D;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") FEChartsAxisTitleSettings Y3D;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") FEChartsAxisTitleSettings Z3D;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") EEChartsXAxisSide XSide = EEChartsXAxisSide::Auto;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ECharts|Axis") EEChartsYAxisSide YSide = EEChartsYAxisSide::Auto;
+	bool operator==(const FEChartsAxisSettings& Other) const
+	{
+		return X2D == Other.X2D && Y2D == Other.Y2D && X3D == Other.X3D && Y3D == Other.Y3D && Z3D == Other.Z3D &&
+			XSide == Other.XSide && YSide == Other.YSide;
+	}
+	bool operator!=(const FEChartsAxisSettings& Other) const { return !(*this == Other); }
+};
+
 enum class EEChartsSeriesDataType : uint8
 {
 	Unset,

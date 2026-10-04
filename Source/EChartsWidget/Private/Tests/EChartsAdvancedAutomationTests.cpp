@@ -594,6 +594,130 @@ namespace EChartsAdvancedTests
 		double Deadline = 0.0;
 		bool bRebuild = false;
 	};
+
+	class FAxisCEFCommand final : public IAutomationLatentCommand
+	{
+	public:
+		explicit FAxisCEFCommand(FAutomationTestBase* InTest) : Test(InTest) {}
+		virtual bool Update() override
+		{
+			if (Stage == 0)
+			{
+				Widget = MakeWidget(); Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+				Widget->OnAxisSettingsApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleAxisSettingsApplied);
+				Widget->OnEChartsApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleApplied);
+				Widget->OnConsoleMessage.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleConsoleMessage);
+				Slate = Widget->TakeWidget();
+				Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine);
+				Advance(); return false;
+			}
+			if (Stage == 1 && Widget->RuntimeState == EEChartsRuntimeState::Ready)
+			{
+				FEChartsAxisSettings Settings;
+				Settings.X2D = Title(TEXT("Time")); Settings.Y2D = Title(TEXT("Value"));
+				Settings.XSide = EEChartsXAxisSide::Top; Settings.YSide = EEChartsYAxisSide::Right;
+				Widget->SetAxisSettings(Settings); Advance(); return false;
+			}
+			if (Stage == 2 && Sink->AxisResultCount >= 1)
+			{
+				Test->TestTrue(TEXT("CEF 2D axis ACK"), Sink->bLastAxisSuccess);
+				Widget->SetSeriesData(0, {{1.0, 2.0}, {2.0, 3.0}});
+				Widget->ApplyEChartsChanges(); Advance(); return false;
+			}
+			if (Stage == 3 && Sink->AppliedCount >= 1)
+			{
+				Probe(TEXT("2D"), TEXT("o.xAxis[0].name==='Time'&&o.yAxis[0].name==='Value'&&o.xAxis[0].position==='top'&&o.yAxis[0].position==='right'&&o.grid[0].containLabel===true"));
+				Advance(); return false;
+			}
+			if (Stage == 4 && ProbeDone(TEXT("2D")))
+			{
+				Widget->InitializeECharts(EEChartsTemplate::DataTableScatter3D);
+				Advance(); return false;
+			}
+			if (Stage == 5 && Widget->RuntimeState == EEChartsRuntimeState::Ready && Widget->EffectiveTemplate == TEXT("DataTableScatter3D"))
+			{
+				FEChartsAxisSettings Settings;
+				Settings.X3D = Title(TEXT("X cube")); Settings.Y3D = Title(TEXT("Y cube")); Settings.Z3D = Title(TEXT("Z cube"));
+				Widget->SetAxisSettings(Settings); ExpectedAxis = Sink->AxisResultCount + 1;
+				Advance(); return false;
+			}
+			if (Stage == 6 && Sink->AxisResultCount >= ExpectedAxis)
+			{
+				Test->TestTrue(TEXT("CEF 3D axis ACK"), Sink->bLastAxisSuccess);
+				Probe(TEXT("3D"), TEXT("o.xAxis3D[0].name==='X cube'&&o.yAxis3D[0].name==='Y cube'&&o.zAxis3D[0].name==='Z cube'"));
+				Advance(); return false;
+			}
+			if (Stage == 7 && ProbeDone(TEXT("3D")))
+			{
+				int64 Request = 0;
+				Widget->ExecuteEChartsJavaScript(TEXT("var m=chart.getModel().getComponent('grid3D',0);var c=chart.getViewOfComponentModel(m)._control;c.setAlpha(17);c.setBeta(23);c.setDistance(180);c.setCenter([1,2,3]);window.__axisCameraBefore=host.getRuntimeViewControlForTesting();chart.dispatchAction({type:'grid3DChangeCamera',alpha:17,beta:23,distance:180,center:[1,2,3],grid3DIndex:0});"), Request);
+				Probe(TEXT("MOVE"), TEXT("JSON.stringify(host.getRuntimeViewControlForTesting())===JSON.stringify(window.__axisCameraBefore)"));
+				Advance(); return false;
+			}
+			if (Stage == 8 && Sink->AdvancedProbeCount >= ExpectedProbe)
+			{
+				if (Sink->LastAdvancedProbe != TEXT("MOVE:OK"))
+				{
+					Probe(TEXT("MOVE"), TEXT("JSON.stringify(host.getRuntimeViewControlForTesting())===JSON.stringify(window.__axisCameraBefore)"));
+					return false;
+				}
+				Test->TestEqual(TEXT("CEF camera moved before axis patch"), Sink->LastAdvancedProbe, FString(TEXT("MOVE:OK")));
+				FEChartsAxisSettings Settings;
+				Settings.X3D = Title(TEXT("X updated")); Settings.Y3D = Title(TEXT("Y cube")); Settings.Z3D = Title(TEXT("Z cube"));
+				Widget->SetAxisSettings(Settings); ExpectedAxis = Sink->AxisResultCount + 1;
+				Advance(); return false;
+			}
+			if (Stage == 9 && Sink->AxisResultCount >= ExpectedAxis)
+			{
+				Probe(TEXT("CAMERA"), TEXT("o.xAxis3D[0].name==='X updated'&&window.__axisCameraBefore!==null&&JSON.stringify(host.getRuntimeViewControlForTesting())===JSON.stringify(window.__axisCameraBefore)"));
+				Advance(); return false;
+			}
+			if (Stage == 10 && ProbeDone(TEXT("CAMERA")))
+			{
+				FEChartsDataPoint3D Point; Point.X = 1; Point.Y = 2; Point.Z = 3;
+				Widget->Set3DData(0, {Point}); Widget->ApplyEChartsChanges(); ExpectedApplied = Sink->AppliedCount + 1;
+				Advance(); return false;
+			}
+			if (Stage == 11 && Sink->AppliedCount >= ExpectedApplied)
+			{
+				Probe(TEXT("APPLY3D"), TEXT("o.xAxis3D[0].name==='X updated'&&o.yAxis3D[0].name==='Y cube'&&o.zAxis3D[0].name==='Z cube'&&JSON.stringify(host.getRuntimeViewControlForTesting())===JSON.stringify(window.__axisCameraBefore)"));
+				Advance(); return false;
+			}
+			if (Stage == 12 && ProbeDone(TEXT("APPLY3D"))) { Cleanup(); return true; }
+			if (FPlatformTime::Seconds() >= Deadline)
+			{
+				Test->AddError(FString::Printf(TEXT("Axis CEF timed out at stage %d; effective=%s; error=%s"), Stage, *Widget->EffectiveTemplate, *Widget->LastError));
+				Cleanup(); return true;
+			}
+			return false;
+		}
+	private:
+		static FEChartsAxisTitleSettings Title(const TCHAR* Name)
+		{
+			FEChartsAxisTitleSettings Result; Result.bOverride = true; Result.Name = Name; Result.Location = EEChartsAxisNameLocation::End;
+			Result.Gap = 24.0f; Result.FontSize = 18; return Result;
+		}
+		void Advance() { ++Stage; Deadline = FPlatformTime::Seconds() + 35.0; }
+		void Probe(const TCHAR* Name, const TCHAR* Condition)
+		{
+			ExpectedProbe = Sink->AdvancedProbeCount + 1;
+			int64 Request = 0;
+			Widget->ExecuteEChartsJavaScript(FString::Printf(TEXT("var o=host.getOptionForTesting();var ok=(%s);console.log('__UE_ECHARTS_TEST_ADVANCED__:%s:'+(ok?'OK':('BAD:'+JSON.stringify({x:o.xAxis3D&&o.xAxis3D[0]&&o.xAxis3D[0].name,before:window.__axisCameraBefore,after:host.getRuntimeViewControlForTesting()}))));"), Condition, Name), Request);
+		}
+		bool ProbeDone(const TCHAR* Name)
+		{
+			if (Sink->AdvancedProbeCount < ExpectedProbe) return false;
+			Test->TestEqual(TEXT("CEF axis probe"), Sink->LastAdvancedProbe, FString(Name) + TEXT(":OK"));
+			return true;
+		}
+		void Cleanup() { Slate.Reset(); if (Widget) DestroyWidget(Widget); if (Sink) Sink->RemoveFromRoot(); }
+		FAutomationTestBase* Test;
+		UEChartsWidget* Widget = nullptr;
+		UEChartsWidgetTestSink* Sink = nullptr;
+		TSharedPtr<SWidget> Slate;
+		double Deadline = 0.0;
+		int32 Stage = 0, ExpectedAxis = 0, ExpectedApplied = 0, ExpectedProbe = 0;
+	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAdvancedReflectionTest,
@@ -686,7 +810,7 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Pre-Ready interaction is cached"), Widget->InteractionMode, EEChartsInteractionMode::Disabled);
 	TestEqual(TEXT("Pre-Ready requests are not sent"), Widget->GetPendingAdvancedRequestCountForTesting(), 0);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
-	TestEqual(TEXT("Ready replays cached option, interaction, and legend"), Widget->GetPendingAdvancedRequestCountForTesting(), 3);
+	TestEqual(TEXT("Ready replays option, interaction, legend, and axes"), Widget->GetPendingAdvancedRequestCountForTesting(), 4);
 
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_OPTION_RESULT__:0:1:1:stale"), FString(), 0);
 	TestEqual(TEXT("Old-generation option result is ignored"), Sink->OptionResultCount, 0);
@@ -696,6 +820,7 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	const int64 OptionRequest = Widget->GetPendingOptionRequestIdForTesting();
 	const int64 InteractionRequest = Widget->GetPendingInteractionRequestIdForTesting();
 	const int64 LegendRequest = Widget->GetPendingLegendRequestIdForTesting();
+	const int64 AxisRequest = Widget->GetPendingAxisRequestIdForTesting();
 	TestTrue(TEXT("Newer candidate queues behind the in-flight transaction"), Widget->SetEChartsOptionJSON(TEXT(
 		"{\"title\":{\"text\":\"bad\"},\"series\":[{\"type\":\"line\",\"xAxisIndex\":999,\"data\":[9]}]}")));
 	TestEqual(TEXT("Queued candidate does not replace in-flight request id"), Widget->GetPendingOptionRequestIdForTesting(), OptionRequest);
@@ -716,6 +841,7 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Option failure clears rejected candidate"), Widget->GetPendingOptionBase64ForTesting().IsEmpty());
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_INTERACTION_RESULT__:1:%lld:1:Disabled"), InteractionRequest), FString(), 0);
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_LEGEND_RESULT__:1:%lld:1:default"), LegendRequest), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_AXIS_RESULT__:1:%lld:1:default"), AxisRequest), FString(), 0);
 	TestEqual(TEXT("Interaction ACK has a dedicated result"), Sink->InteractionResultCount, 1);
 	TestTrue(TEXT("Interaction ACK reports success"), Sink->bLastInteractionSuccess);
 
@@ -736,23 +862,26 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_JAVASCRIPT_RESULT__:1:%lld:1:late"), JavaScriptRequest), FString(), 0);
 	TestEqual(TEXT("Old-generation JavaScript result is ignored"), Sink->JavaScriptResultCount, 1);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
-	TestEqual(TEXT("Rebuild replays option, interaction, and legend"), Widget->GetPendingAdvancedRequestCountForTesting(), 3);
+	TestEqual(TEXT("Rebuild replays option, interaction, legend, and axes"), Widget->GetPendingAdvancedRequestCountForTesting(), 4);
 	const int32 ResultsBeforeReplayFailure = Sink->OptionResultCount;
 	const int64 ReplayRequest = Widget->GetPendingOptionRequestIdForTesting();
 	const int64 RebuildInteractionRequest = Widget->GetPendingInteractionRequestIdForTesting();
 	const int64 RebuildLegendRequest = Widget->GetPendingLegendRequestIdForTesting();
+	const int64 RebuildAxisRequest = Widget->GetPendingAxisRequestIdForTesting();
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(
 		TEXT("__UE_ECHARTS_OPTION_RESULT__:2:%lld:0:replay failed; previous chart restored"), ReplayRequest), FString(), 0);
 	TestEqual(TEXT("Cached replay failure broadcasts exactly once"), Sink->OptionResultCount, ResultsBeforeReplayFailure + 1);
 	TestFalse(TEXT("Cached replay failure reports false"), Sink->bLastOptionSuccess);
 	TestEqual(TEXT("Cached replay failure remains non-terminal"), Widget->RuntimeState, EEChartsRuntimeState::Ready);
 	TestEqual(TEXT("Cached replay failure clears its in-flight request"), Widget->GetPendingOptionRequestIdForTesting(), int64(0));
-	TestEqual(TEXT("Cached replay failure does not immediately retry in the same generation"), Widget->GetPendingAdvancedRequestCountForTesting(), 2);
+	TestEqual(TEXT("Cached replay failure does not immediately retry in the same generation"), Widget->GetPendingAdvancedRequestCountForTesting(), 3);
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_WARNING__:2:unrelated"), FString(), 0);
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(
 		TEXT("__UE_ECHARTS_INTERACTION_RESULT__:2:%lld:1:Disabled"), RebuildInteractionRequest), FString(), 0);
 	Widget->OnConsoleMessage.Broadcast(FString::Printf(
 		TEXT("__UE_ECHARTS_LEGEND_RESULT__:2:%lld:1:default"), RebuildLegendRequest), FString(), 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(
+		TEXT("__UE_ECHARTS_AXIS_RESULT__:2:%lld:1:default"), RebuildAxisRequest), FString(), 0);
 	TestEqual(TEXT("Unrelated messages do not restart cached replay"), Widget->GetPendingOptionRequestIdForTesting(), int64(0));
 	TestEqual(TEXT("Unrelated messages do not duplicate option result"), Sink->OptionResultCount, ResultsBeforeReplayFailure + 1);
 	TestEqual(TEXT("All generation-two advanced requests settle"), Widget->GetPendingAdvancedRequestCountForTesting(), 0);
@@ -760,7 +889,7 @@ bool FEChartsAdvancedStateMachineTest::RunTest(const FString& Parameters)
 	Widget->PrepareRebuildForTesting();
 	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:3"), FString(), 0);
 	TestTrue(TEXT("A new generation may retry the retained last-good option"), Widget->GetPendingOptionRequestIdForTesting() > 0);
-	TestEqual(TEXT("Generation-three option, interaction, and legend are each queued once"), Widget->GetPendingAdvancedRequestCountForTesting(), 3);
+	TestEqual(TEXT("Generation-three option, interaction, legend, and axes are each queued once"), Widget->GetPendingAdvancedRequestCountForTesting(), 4);
 
 	Widget->ReleaseSlateResources(false);
 	Widget->RemoveFromRoot();
@@ -944,6 +1073,58 @@ bool FEChartsLegendSettingsLifecycleTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Failed migrated request preserves last-good"), Widget->LegendSettings.FontSize, 12);
 	TestEqual(TEXT("Legend failure callback reentry keeps the new generation Loading"), Widget->RuntimeState, EEChartsRuntimeState::Loading);
 
+	EChartsAdvancedTests::DestroyWidget(Widget); Sink->RemoveFromRoot();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAxisSettingsLifecycleTest,
+	"EChartsWidget.Advanced.AxisSettingsLifecycle", EChartsAdvancedTests::Flags)
+bool FEChartsAxisSettingsLifecycleTest::RunTest(const FString& Parameters)
+{
+	UEChartsWidget* Widget = EChartsAdvancedTests::MakeWidget();
+	UEChartsWidgetTestSink* Sink = NewObject<UEChartsWidgetTestSink>(); Sink->AddToRoot();
+	Widget->OnAxisSettingsApplied.AddDynamic(Sink, &UEChartsWidgetTestSink::HandleAxisSettingsApplied);
+	TestNotNull(TEXT("Set Axis Settings is reflected"), Widget->FindFunction(TEXT("SetAxisSettings")));
+	TestNotNull(TEXT("Reset Axis Settings is reflected"), Widget->FindFunction(TEXT("ResetAxisSettings")));
+	TestFalse(TEXT("Default X title preserves template"), Widget->AxisSettings.X2D.bOverride);
+	TestEqual(TEXT("Default X side is Auto"), Widget->AxisSettings.XSide, EEChartsXAxisSide::Auto);
+	TestEqual(TEXT("Default 3D Z location"), Widget->AxisSettings.Z3D.Location, EEChartsAxisNameLocation::Middle);
+	Widget->InitializeECharts();
+	FEChartsAxisSettings Candidate;
+	Candidate.X2D.bOverride = true;
+	Candidate.X2D.Name = TEXT("时间 😀");
+	Candidate.X2D.Gap = 999.0f;
+	Candidate.X2D.FontSize = 1;
+	Candidate.XSide = EEChartsXAxisSide::Top;
+	Widget->SetAxisSettings(Candidate);
+	TestFalse(TEXT("Loading candidate has not committed"), Widget->AxisSettings.X2D.bOverride);
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:1"), FString(), 0);
+	const int64 First = Widget->GetPendingAxisRequestIdForTesting();
+	TestTrue(TEXT("Ready sends axis candidate"), First > 0);
+	TestEqual(TEXT("Candidate gap clamps"), Widget->GetInFlightAxisSettingsForTesting().X2D.Gap, 200.0f);
+	TestEqual(TEXT("Candidate font clamps"), Widget->GetInFlightAxisSettingsForTesting().X2D.FontSize, 6);
+	Candidate.X2D.Name = TEXT("latest");
+	Widget->SetAxisSettings(Candidate);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_AXIS_RESULT__:1:%lld:0:failed"), First), FString(), 0);
+	TestFalse(TEXT("Failed request leaves last-good unmodified"), Widget->AxisSettings.X2D.bOverride);
+	const int64 Latest = Widget->GetPendingAxisRequestIdForTesting();
+	TestTrue(TEXT("Latest request follows failed first"), Latest > 0 && Latest != First);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_AXIS_RESULT__:1:%lld:1:applied"), Latest), FString(), 0);
+	TestEqual(TEXT("ACK commits latest name"), Widget->AxisSettings.X2D.Name, FString(TEXT("latest")));
+	Widget->ReleaseSlateResources(false); Widget->PrepareRebuildForTesting();
+	Widget->OnConsoleMessage.Broadcast(TEXT("__UE_ECHARTS_READY__:2"), FString(), 0);
+	const int64 Replayed = Widget->GetPendingAxisRequestIdForTesting();
+	TestTrue(TEXT("Rebuild replays axis settings"), Replayed > 0);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_AXIS_RESULT__:1:%lld:1:stale"), Latest), FString(), 0);
+	TestEqual(TEXT("Stale generation ACK ignored"), Widget->GetPendingAxisRequestIdForTesting(), Replayed);
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_AXIS_RESULT__:2:%lld:1:replayed"), Replayed), FString(), 0);
+	Widget->ResetAxisSettings();
+	TestTrue(TEXT("Reset waits for ACK"), Widget->AxisSettings.X2D.bOverride);
+	const int64 Reset = Widget->GetPendingAxisRequestIdForTesting();
+	Widget->OnConsoleMessage.Broadcast(FString::Printf(TEXT("__UE_ECHARTS_AXIS_RESULT__:2:%lld:1:reset"), Reset), FString(), 0);
+	TestFalse(TEXT("Reset ACK restores default"), Widget->AxisSettings.X2D.bOverride);
+	TestEqual(TEXT("Axis callback count"), Sink->AxisResultCount, 4);
+	TestTrue(TEXT("Unsafe axis payload cannot enter command"), FEChartsWidgetJavascript::BuildSetAxisSettingsCommand(1, TEXT("bad;alert(1)")).IsEmpty());
 	EChartsAdvancedTests::DestroyWidget(Widget); Sink->RemoveFromRoot();
 	return true;
 }
@@ -1153,6 +1334,19 @@ bool FEChartsAdvancedCEFIntegrationTest::RunTest(const FString& Parameters)
 	}
 	const TSharedRef<EChartsAdvancedTests::FAdvancedCEFState> State = MakeShared<EChartsAdvancedTests::FAdvancedCEFState>();
 	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FAdvancedCEFCommand(State, this));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEChartsAxisCEFIntegrationTest,
+	"EChartsWidget.Advanced.Integration.CEFAxisTitles", EChartsAdvancedTests::Flags)
+bool FEChartsAxisCEFIntegrationTest::RunTest(const FString& Parameters)
+{
+	if (FParse::Param(FCommandLine::Get(), TEXT("NullRHI")))
+	{
+		AddInfo(TEXT("Axis title CEF coverage requires D3D12."));
+		return true;
+	}
+	ADD_LATENT_AUTOMATION_COMMAND(EChartsAdvancedTests::FAxisCEFCommand(this));
 	return true;
 }
 

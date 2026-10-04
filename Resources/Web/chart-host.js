@@ -34,6 +34,8 @@
     let currentEffectiveTemplate = null;
     let templateBaseOption = null;
     let currentOption = null;
+    let currentRawOption = null;
+    let currentAxisSettings = {};
     let currentPayload = null;
     let currentInteractionMode = 'ClickOnly';
     let currentLegendSettings = {
@@ -131,6 +133,129 @@
         customXPercent: clampNumber(value.customXPercent, 0, 100, 50),
         customYPercent: clampNumber(value.customYPercent, 0, 100, 5)
       };
+    }
+
+    function normalizeAxisSettings(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Axis settings must be an object');
+      const result = {};
+      ['x2D', 'y2D', 'x3D', 'y3D', 'z3D'].forEach(function (key) {
+        const title = value[key] || {};
+        if (typeof title !== 'object' || Array.isArray(title)) throw new Error('Invalid ' + key + ' title');
+        const location = title.location || 'Middle';
+        if (!['Start', 'Middle', 'End'].includes(location) || (title.bOverride && typeof title.name !== 'string')) throw new Error('Invalid ' + key + ' title');
+        result[key] = { bOverride: title.bOverride === true, name: title.name || '', location: location.toLowerCase(),
+          gap: clampNumber(title.gap, 0, 200, 20), fontSize: clampNumber(title.fontSize, 6, 72, 16) };
+      });
+      result.xSide = value.xSide || 'Auto'; result.ySide = value.ySide || 'Auto';
+      if (!['Auto', 'Top', 'Bottom'].includes(result.xSide) || !['Auto', 'Left', 'Right'].includes(result.ySide)) throw new Error('Invalid axis side');
+      return result;
+    }
+
+    function visitOptionScopes(option, visit) {
+      const visited = new WeakSet();
+      function walk(scope) {
+        if (!scope || typeof scope !== 'object' || visited.has(scope)) return;
+        visited.add(scope);
+        visit(scope);
+        walk(scope.baseOption);
+        if (Array.isArray(scope.options)) scope.options.forEach(walk);
+        if (Array.isArray(scope.media)) scope.media.forEach(function (item) { walk(item && item.option); });
+      }
+      walk(option);
+    }
+
+    function marginAtLeast(value, minimum, dimension) {
+      if (typeof value === 'number') return Math.max(value, minimum);
+      if (typeof value === 'string') {
+        const percent = /^\s*(\d+(?:\.\d+)?)%\s*$/.exec(value);
+        if (percent && Number.isFinite(dimension) && dimension > 0) {
+          return Number(percent[1]) * dimension / 100 >= minimum ? value : minimum;
+        }
+        return value;
+      }
+      return minimum;
+    }
+
+    function applyAxisSettings(option, settings) {
+      visitOptionScopes(option, function (scope) {
+        [['xAxis', 'x2D', 'xSide'], ['yAxis', 'y2D', 'ySide'],
+          ['xAxis3D', 'x3D', null], ['yAxis3D', 'y3D', null], ['zAxis3D', 'z3D', null]].forEach(function (entry) {
+          const key = entry[0];
+          if (!Object.prototype.hasOwnProperty.call(scope, key) || scope[key] == null) return;
+          const title = settings[entry[1]];
+          const side = entry[2] && settings[entry[2]];
+          const axes = Array.isArray(scope[key]) ? scope[key] : [scope[key]];
+          axes.forEach(function (axis) {
+            if (!axis || typeof axis !== 'object') return;
+            if (title && title.bOverride) {
+              axis.name = title.name;
+              axis.nameLocation = title.location;
+              axis.nameGap = title.gap;
+              axis.nameTextStyle = Object.assign({}, axis.nameTextStyle || {}, { fontSize: title.fontSize });
+            }
+            if (side && side !== 'Auto') axis.position = side.toLowerCase();
+          });
+        });
+        const xTop = scope.xAxis != null && settings.xSide === 'Top';
+        const yRight = scope.yAxis != null && settings.ySide === 'Right';
+        if (!xTop && !yRight) return;
+        if (scope.grid == null) scope.grid = {};
+        const grids = Array.isArray(scope.grid) ? scope.grid : [scope.grid];
+        grids.forEach(function (grid) {
+          if (!grid || typeof grid !== 'object') return;
+          grid.containLabel = true;
+          if (xTop) {
+            const title = settings.x2D;
+            const minimum = 24 + (title && title.bOverride ? title.gap + title.fontSize : 36);
+            const height = chart && typeof chart.getHeight === 'function' ? chart.getHeight() : chartElement.clientHeight;
+            grid.top = marginAtLeast(grid.top, minimum, height);
+          }
+          if (yRight) {
+            const title = settings.y2D;
+            const minimum = 24 + (title && title.bOverride ? title.gap + title.fontSize : 36);
+            const width = chart && typeof chart.getWidth === 'function' ? chart.getWidth() : chartElement.clientWidth;
+            grid.right = marginAtLeast(grid.right, minimum, width);
+          }
+        });
+      });
+      return option;
+    }
+
+    function axisPatch(option) {
+      const patch = {};
+      ['xAxis', 'yAxis', 'xAxis3D', 'yAxis3D', 'zAxis3D'].forEach(function (key) {
+        if (!Object.prototype.hasOwnProperty.call(option, key) || option[key] == null) return;
+        const axes = Array.isArray(option[key]) ? option[key] : [option[key]];
+        const prepared = axes.map(function (axis) {
+          const item = clone(axis);
+          if (!Object.prototype.hasOwnProperty.call(item, 'name')) item.name = '';
+          if (!Object.prototype.hasOwnProperty.call(item, 'nameLocation')) item.nameLocation = 'middle';
+          const is3D = key.endsWith('3D');
+          if (!Object.prototype.hasOwnProperty.call(item, 'nameGap')) item.nameGap = is3D ? 20 : 15;
+          item.nameTextStyle = Object.assign({ fontSize: is3D ? 16 : 12 }, item.nameTextStyle || {});
+          if ((key === 'xAxis' || key === 'yAxis') && !Object.prototype.hasOwnProperty.call(item, 'position')) {
+            item.position = key === 'xAxis' ? 'bottom' : 'left';
+          }
+          return item;
+        });
+        patch[key] = Array.isArray(option[key]) ? prepared : prepared[0];
+      });
+      if (option.grid != null || option.xAxis != null || option.yAxis != null) {
+        const sourceGrid = option.grid == null ? {} : option.grid;
+        const grids = Array.isArray(sourceGrid) ? sourceGrid : [sourceGrid];
+        const prepared = grids.map(function (grid) {
+          const item = clone(grid);
+          if (!Object.prototype.hasOwnProperty.call(item, 'containLabel')) item.containLabel = false;
+          return item;
+        });
+        patch.grid = Array.isArray(sourceGrid) ? prepared : prepared[0];
+      }
+      if (option.baseOption) patch.baseOption = axisPatch(option.baseOption);
+      if (Array.isArray(option.options)) patch.options = option.options.map(axisPatch);
+      if (Array.isArray(option.media)) patch.media = option.media.map(function (item) {
+        return Object.assign({}, item.query ? { query: clone(item.query) } : {}, { option: axisPatch(item.option || {}) });
+      });
+      return patch;
     }
 
     function legendLayout(settings) {
@@ -378,6 +503,7 @@
         if (layout !== lastResponsiveLegendLayout) {
           lastResponsiveLegendLayout = layout;
           currentOption.legend = clone(candidate.legend);
+          if (currentRawOption) currentRawOption.legend = clone(candidate.legend);
           chart.setOption({ legend: clone(candidate.legend) }, { notMerge: false, lazyUpdate: false });
         }
       }
@@ -394,10 +520,13 @@
           if (result.effectiveTemplate !== result.requestedTemplate) {
             emit('WARNING', 'WebGL unavailable; using ' + result.effectiveTemplate + ' for ' + result.requestedTemplate);
           }
+          const rawOption = clone(option);
+          applyAxisSettings(option, currentAxisSettings);
           chart.clear();
           chart.setOption(option, { notMerge: true, lazyUpdate: false });
           currentEffectiveTemplate = result.effectiveTemplate;
-          templateBaseOption = clone(option);
+          templateBaseOption = rawOption;
+          currentRawOption = clone(rawOption);
           currentOption = option;
           currentPayload = null;
           currentInteractionMode = interactionMode || 'ClickOnly';
@@ -424,6 +553,7 @@
           const option = window.UEEChartsTemplates.applyInteractionMode(currentOption, interactionMode);
           chart.setOption(option, { notMerge: true, lazyUpdate: false });
           currentOption = option;
+          currentRawOption = window.UEEChartsTemplates.applyInteractionMode(currentRawOption, interactionMode);
           currentInteractionMode = interactionMode;
           emitResult('INTERACTION_RESULT', requestId, true, interactionMode);
           return true;
@@ -438,6 +568,7 @@
         let optionSnapshot = null;
         let templateSnapshot = null;
         let settingsSnapshot = null;
+        let rawSnapshot = null;
         let layoutSnapshot = '';
         let chartMutationAttempted = false;
         try {
@@ -448,15 +579,19 @@
           const templateCandidate = clone(templateBaseOption);
           const layoutCandidate = applyLegendSettings(optionCandidate, settings);
           if (templateCandidate) applyLegendSettings(templateCandidate, settings);
+          const rawCandidate = clone(currentRawOption);
+          if (rawCandidate) applyLegendSettings(rawCandidate, settings);
           chartSnapshot = clone(chart.getOption());
           optionSnapshot = clone(currentOption);
           templateSnapshot = clone(templateBaseOption);
           settingsSnapshot = clone(currentLegendSettings);
+          rawSnapshot = clone(currentRawOption);
           layoutSnapshot = lastResponsiveLegendLayout;
           chartMutationAttempted = true;
           chart.setOption({ legend: clone(optionCandidate.legend) }, { notMerge: false, lazyUpdate: false });
           currentLegendSettings = settings;
           currentOption = optionCandidate;
+          currentRawOption = rawCandidate;
           templateBaseOption = templateCandidate;
           lastResponsiveLegendLayout = layoutCandidate;
           emitResult('LEGEND_RESULT', requestId, true, 'Legend settings applied');
@@ -470,6 +605,7 @@
               currentOption = optionSnapshot;
               templateBaseOption = templateSnapshot;
               currentLegendSettings = settingsSnapshot;
+              currentRawOption = rawSnapshot;
               lastResponsiveLegendLayout = layoutSnapshot;
             } catch (rollbackError) {
               const damagedChart = chart;
@@ -482,6 +618,7 @@
                 currentOption = optionSnapshot;
                 templateBaseOption = templateSnapshot;
                 currentLegendSettings = settingsSnapshot;
+                currentRawOption = rawSnapshot;
                 lastResponsiveLegendLayout = layoutSnapshot;
               } catch (recoveryError) {
                 const recoveryDetail = recoveryError && recoveryError.message ? recoveryError.message : String(recoveryError);
@@ -496,6 +633,52 @@
           return false;
         }
       },
+      setAxisSettingsBase64: function (requestId, base64) {
+        let chartSnapshot = null;
+        let optionSnapshot = null;
+        let attempted = false;
+        try {
+          if (!validRequestId(requestId)) throw new Error('Invalid axis request id');
+          const settings = normalizeAxisSettings(JSON.parse(decodeBase64Text(base64, 64 * 1024, 'axis settings')));
+          if (!currentRawOption) throw new Error('Chart option is not ready');
+          const candidate = applyAxisSettings(clone(currentRawOption), settings);
+          const patch = axisPatch(candidate);
+          chartSnapshot = clone(chart.getOption());
+          optionSnapshot = currentOption;
+          attempted = true;
+          chart.setOption(patch, Object.prototype.hasOwnProperty.call(patch, 'grid')
+            ? { notMerge: false, lazyUpdate: false, replaceMerge: 'grid' }
+            : { notMerge: false, lazyUpdate: false });
+          currentAxisSettings = settings;
+          currentOption = candidate;
+          emitResult('AXIS_RESULT', requestId, true, 'Axis settings applied');
+          return true;
+        } catch (error) {
+          let detail = error && error.message ? error.message : String(error);
+          if (attempted) {
+            try {
+              chart.clear();
+              chart.setOption(chartSnapshot, { notMerge: true, lazyUpdate: false });
+              currentOption = optionSnapshot;
+            } catch (rollbackError) {
+              const damagedChart = chart;
+              try { chart.dispose(); } catch (_) {}
+              try { if (typeof window.echarts.dispose === 'function') window.echarts.dispose(chartElement); } catch (_) {}
+              try {
+                chart = window.echarts.init(chartElement, null, { renderer: 'canvas' });
+                if (chart === damagedChart) throw new Error('ECharts returned the damaged chart instance');
+                chart.setOption(chartSnapshot, { notMerge: true, lazyUpdate: false });
+                currentOption = optionSnapshot;
+              } catch (recoveryError) {
+                detail += '; rollback failed: ' + (recoveryError && recoveryError.message ? recoveryError.message : String(recoveryError));
+                emit('ERROR', 'axis rollback failed: ' + detail.replace(/[\r\n]+/g, ' | '));
+              }
+            }
+          }
+          emitResult('AXIS_RESULT', requestId, false, detail);
+          return false;
+        }
+      },
       applyOptionBase64: function (requestId, base64) {
         let chartSnapshot = null;
         let optionSnapshot = null;
@@ -503,6 +686,7 @@
         let payloadSnapshot = null;
         let effectiveTemplateSnapshot = null;
         let interactionModeSnapshot = null;
+        let rawSnapshot = null;
         let chartMutationAttempted = false;
         try {
           if (!validRequestId(requestId)) throw new Error('Invalid option request id');
@@ -512,16 +696,20 @@
           }
           const option = window.UEEChartsTemplates.applyInteractionMode(optionValue, currentInteractionMode);
           const legendLayoutCandidate = applyLegendSettings(option, currentLegendSettings);
+          const rawOption = clone(option);
+          applyAxisSettings(option, currentAxisSettings);
           chartSnapshot = clone(chart.getOption());
           optionSnapshot = clone(currentOption);
           templateSnapshot = clone(templateBaseOption);
           payloadSnapshot = clone(currentPayload);
           effectiveTemplateSnapshot = currentEffectiveTemplate;
           interactionModeSnapshot = currentInteractionMode;
+          rawSnapshot = clone(currentRawOption);
           chartMutationAttempted = true;
           chart.setOption(option, { notMerge: true, lazyUpdate: false });
           currentEffectiveTemplate = 'CustomOption';
-          templateBaseOption = clone(option);
+          templateBaseOption = rawOption;
+          currentRawOption = clone(rawOption);
           currentOption = option;
           currentPayload = null;
           lastResponsiveLegendLayout = legendLayoutCandidate;
@@ -559,6 +747,7 @@
               currentPayload = payloadSnapshot;
               currentEffectiveTemplate = effectiveTemplateSnapshot;
               currentInteractionMode = interactionModeSnapshot;
+              currentRawOption = rawSnapshot;
               if (cleanupErrors.length > 0) detail += '; recovery cleanup: ' + cleanupErrors.join(' | ');
               detail += '; previous chart restored';
             } catch (rollbackError) {
@@ -593,7 +782,10 @@
           const payload = decodePayload(base64);
           const pointCount = validatePayload(payload);
           const option = optionForPayload(payload);
+          const rawOption = clone(option);
+          applyAxisSettings(option, currentAxisSettings);
           applyDataOption(option);
+          currentRawOption = rawOption;
           currentOption = option;
           currentPayload = clone(payload);
           emit('APPLIED', String(payload.revision) + ':' + String(pointCount));
@@ -621,7 +813,10 @@
           candidate.series[0].data.push.apply(candidate.series[0].data, clone(delta.series.data));
           const pointCount = validatePayload(candidate);
           const option = optionForPayload(candidate);
+          const rawOption = clone(option);
+          applyAxisSettings(option, currentAxisSettings);
           applyDataOption(option);
+          currentRawOption = rawOption;
           currentOption = option;
           currentPayload = candidate;
           emit('APPLIED', String(candidate.revision) + ':' + String(pointCount));

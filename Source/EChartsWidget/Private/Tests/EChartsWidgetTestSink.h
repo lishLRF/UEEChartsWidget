@@ -213,6 +213,13 @@ public:
 			Widget->InitializeECharts(EEChartsTemplate::SegmentedAreaLine, EEChartsInteractionMode::ClickOnly);
 		}
 	}
+	UFUNCTION()
+	void HandleAxisSettingsApplied(bool bSuccess, const FString& Message)
+	{
+		++AxisResultCount;
+		bLastAxisSuccess = bSuccess;
+		LastAdvancedMessage = Message;
+	}
 
 	UFUNCTION()
 	void HandleJavaScriptResult(int64 RequestId, bool bSuccess, const FString& Message)
@@ -231,6 +238,7 @@ public:
 	int32 OptionResultCount = 0;
 	int32 InteractionResultCount = 0;
 	int32 LegendResultCount = 0;
+	int32 AxisResultCount = 0;
 	int32 JavaScriptResultCount = 0;
 	int64 LastAppliedRevision = 0;
 	int32 LastAppliedPointCount = 0;
@@ -238,6 +246,7 @@ public:
 	bool bLastOptionSuccess = false;
 	bool bLastInteractionSuccess = false;
 	bool bLastLegendSuccess = false;
+	bool bLastAxisSuccess = false;
 	bool bLastJavaScriptSuccess = false;
 	EEChartsInteractionMode LastInteractionMode = EEChartsInteractionMode::ClickOnly;
 	FString LastAdvancedMessage;

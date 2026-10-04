@@ -919,6 +919,180 @@ test('failed legend mutation rolls back visible and internal last-good state', (
   assert.ok(state.logs.some(line => line.includes('__UE_ECHARTS_LEGEND_RESULT__:7:2:0:legend mutation failed')));
 });
 
+test('axis titles apply to 2D axes, survive data replacement, and reset to template defaults', () => {
+  const state = createHostContext(); let visible = {};
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() { visible = {}; }, resize() {}, dispose() {},
+    setOption(option) { visible = Object.assign({}, visible, JSON.parse(JSON.stringify(option))); }, getOption() { return JSON.parse(JSON.stringify(visible)); } });
+  vm.runInContext(hostSource, state.context);
+  const host = state.window.UEEChartsHost;
+  host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  const settings = { x2D: { bOverride: true, name: '时间 😀', location: 'Start', gap: 24, fontSize: 19 },
+    y2D: { bOverride: true, name: '值', location: 'End', gap: 31, fontSize: 23 }, xSide: 'Top', ySide: 'Right' };
+  assert.equal(host.setAxisSettingsBase64(11, encodePayload(settings)), true);
+  assert.equal(visible.xAxis.name, '时间 😀'); assert.equal(visible.xAxis.nameLocation, 'start');
+  assert.equal(visible.xAxis.nameGap, 24); assert.equal(visible.xAxis.nameTextStyle.fontSize, 19); assert.equal(visible.xAxis.position, 'top');
+  assert.equal(visible.yAxis.name, '值'); assert.equal(visible.yAxis.nameLocation, 'end'); assert.equal(visible.yAxis.position, 'right');
+  const payload = { revision: 1, template: 'SegmentedAreaLine', xAxisMode: 'ShowAll', series: [{ index: 0, name: 'A', type: 'numeric2D', data: [[1, 2]] }] };
+  assert.equal(host.applyDataBase64(encodePayload(payload)), true);
+  assert.equal(visible.xAxis.name, '时间 😀'); assert.equal(visible.yAxis.name, '值');
+  assert.equal(host.setAxisSettingsBase64(12, encodePayload({})), true);
+  assert.equal(visible.xAxis.name || '', ''); assert.equal(visible.yAxis.name || '', '');
+  assert.equal(visible.xAxis.position, 'bottom'); assert.equal(visible.yAxis.position, 'left');
+  assert.ok(state.logs.includes('__UE_ECHARTS_AXIS_RESULT__:7:12:1:Axis settings applied'));
+});
+
+test('axis settings override CustomOption object and array axes without creating absent 3D axes', () => {
+  const state = createHostContext(); let visible = {};
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() { visible = {}; }, resize() {}, dispose() {},
+    setOption(option) { visible = Object.assign({}, visible, JSON.parse(JSON.stringify(option))); }, getOption() { return JSON.parse(JSON.stringify(visible)); } });
+  vm.runInContext(hostSource, state.context); const host = state.window.UEEChartsHost;
+  host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  const settings = { x2D: { bOverride: true, name: 'blueprint', location: 'Middle', gap: 20, fontSize: 16 },
+    x3D: { bOverride: true, name: 'cube-x', location: 'End', gap: 18, fontSize: 17 }, xSide: 'Bottom' };
+  assert.equal(host.setAxisSettingsBase64(1, encodePayload(settings)), true);
+  assert.equal(host.applyOptionBase64(2, encodePayload({ xAxis: [{ name: 'raw-a' }, { name: 'raw-b' }], yAxis: {}, series: [] })), true);
+  assert.equal(visible.xAxis.length, 2); assert.ok(visible.xAxis.every(axis => axis.name === 'blueprint'));
+  assert.equal(visible.xAxis3D, undefined);
+  assert.equal(host.applyOptionBase64(3, encodePayload({ xAxis3D: { name: 'original' }, yAxis3D: {}, zAxis3D: {}, grid3D: { viewControl: { alpha: 33 } }, series: [] })), true);
+  assert.equal(visible.xAxis3D.name, 'cube-x'); assert.equal(visible.xAxis3D.nameLocation, 'end');
+  assert.equal(visible.grid3D.viewControl.alpha, 33);
+  assert.equal(host.setAxisSettingsBase64(4, encodePayload({})), true);
+  assert.equal(visible.xAxis3D.name, 'original');
+  assert.equal(visible.xAxis3D.nameGap, 20); assert.equal(visible.xAxis3D.nameTextStyle.fontSize, 16);
+});
+
+test('native 3D X Y Z titles survive data update without patching grid3D, and fallback only shows 2D titles', () => {
+  const state = createHostContext(); let visible = {}; const calls = [];
+  state.window.location.search = '?generation=7&forceWebGL=1';
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() { visible = {}; }, resize() {}, dispose() {},
+    setOption(option) { calls.push(JSON.parse(JSON.stringify(option))); visible = Object.assign({}, visible, JSON.parse(JSON.stringify(option))); },
+    getOption() { return JSON.parse(JSON.stringify(visible)); } });
+  vm.runInContext(hostSource, state.context); const host = state.window.UEEChartsHost;
+  host.renderTemplate('DataTableScatter3D', {}, 'ClickOnly');
+  const title = (name) => ({ bOverride: true, name, location: 'End', gap: 29, fontSize: 21 });
+  assert.equal(host.setAxisSettingsBase64(1, encodePayload({ x3D: title('X'), y3D: title('Y'), z3D: title('Z') })), true);
+  assert.equal(visible.xAxis3D.name, 'X'); assert.equal(visible.yAxis3D.name, 'Y'); assert.equal(visible.zAxis3D.name, 'Z');
+  assert.equal(calls.at(-1).grid3D, undefined);
+  assert.equal(host.applyDataBase64(encodePayload({ revision: 1, template: 'DataTableScatter3D', xAxisMode: 'ShowAll', series: [{ index: 0, name: 'A', type: 'data3D', data: [[1, 2, 3, 4, 5]] }] })), true);
+  assert.equal(visible.xAxis3D.name, 'X'); assert.equal(visible.zAxis3D.name, 'Z');
+  host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  assert.equal(visible.xAxis3D, undefined);
+});
+
+test('failed axis transaction restores visible state and leaves later data based on last good settings', () => {
+  const state = createHostContext(); let visible = {}; let fail = false;
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() { visible = {}; }, resize() {}, dispose() {},
+    setOption(option) { visible = Object.assign({}, visible, JSON.parse(JSON.stringify(option)));
+      if (fail && option.xAxis && option.xAxis.name === 'bad') { fail = false; throw new Error('axis mutation failed'); } },
+    getOption() { return JSON.parse(JSON.stringify(visible)); } });
+  vm.runInContext(hostSource, state.context); const host = state.window.UEEChartsHost;
+  host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  const good = { x2D: { bOverride: true, name: 'good', location: 'Middle', gap: 20, fontSize: 16 } };
+  assert.equal(host.setAxisSettingsBase64(1, encodePayload(good)), true);
+  fail = true;
+  assert.equal(host.setAxisSettingsBase64(2, encodePayload({ x2D: { bOverride: true, name: 'bad', location: 'Middle', gap: 20, fontSize: 16 } })), false);
+  assert.equal(visible.xAxis.name, 'good');
+  assert.equal(host.applyDataBase64(encodePayload({ revision: 1, template: 'SegmentedAreaLine', xAxisMode: 'ShowAll', series: [{ index: 0, name: 'A', type: 'numeric2D', data: [[1, 2]] }] })), true);
+  assert.equal(visible.xAxis.name, 'good');
+  assert.ok(state.logs.some(line => line.includes('__UE_ECHARTS_AXIS_RESULT__:7:2:0:axis mutation failed')));
+});
+
+test('responsive legend layout survives axis settings followed by interaction rebuild', () => {
+  const state = createHostContext(); let visible = {};
+  state.chartElement.clientWidth = 900;
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() { visible = {}; }, resize() {}, dispose() {},
+    setOption(option) { visible = Object.assign({}, visible, JSON.parse(JSON.stringify(option))); }, getOption() { return JSON.parse(JSON.stringify(visible)); } });
+  vm.runInContext(hostSource, state.context); const host = state.window.UEEChartsHost;
+  host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  state.chartElement.clientWidth = 600; state.observers[0].callback();
+  assert.equal(visible.legend.right, '2%');
+  assert.equal(host.setAxisSettingsBase64(1, encodePayload({ x2D: { bOverride: true, name: 'X', location: 'Middle', gap: 20, fontSize: 16 } })), true);
+  assert.equal(host.setInteractionMode(2, 'FullHover'), true);
+  assert.equal(visible.legend.right, '2%');
+});
+
+test('axis settings cover CustomOption timeline and responsive media axes then reset original names', () => {
+  const state = createHostContext(); let visible = {};
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() { visible = {}; }, resize() {}, dispose() {},
+    setOption(option) { visible = Object.assign({}, visible, JSON.parse(JSON.stringify(option))); }, getOption() { return JSON.parse(JSON.stringify(visible)); } });
+  vm.runInContext(hostSource, state.context); const host = state.window.UEEChartsHost;
+  host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  const original = { baseOption: { xAxis: { name: 'base' }, yAxis: { name: 'base-y' } },
+    options: [{ xAxis: { name: 'frame' } }], media: [{ query: { maxWidth: 500 }, option: { yAxis: { name: 'media' } } }], series: [] };
+  assert.equal(host.applyOptionBase64(1, encodePayload(original)), true);
+  const title = (name) => ({ bOverride: true, name, location: 'End', gap: 25, fontSize: 20 });
+  assert.equal(host.setAxisSettingsBase64(2, encodePayload({ x2D: title('X'), y2D: title('Y') })), true);
+  assert.equal(visible.baseOption.xAxis.name, 'X'); assert.equal(visible.options[0].xAxis.name, 'X');
+  assert.equal(visible.media[0].option.yAxis.name, 'Y');
+  assert.equal(host.setAxisSettingsBase64(3, encodePayload({})), true);
+  assert.equal(visible.baseOption.xAxis.name, 'base'); assert.equal(visible.options[0].xAxis.name, 'frame');
+  assert.equal(visible.media[0].option.yAxis.name, 'media');
+});
+
+test('2D top and right axis titles reserve visible grid space and reset to source margins', () => {
+  const state = createHostContext(); let visible = {};
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() { visible = {}; }, resize() {}, dispose() {},
+    setOption(option) { visible = Object.assign({}, visible, JSON.parse(JSON.stringify(option))); }, getOption() { return JSON.parse(JSON.stringify(visible)); } });
+  vm.runInContext(hostSource, state.context); const host = state.window.UEEChartsHost;
+  host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  const originalTop = visible.grid.top; const originalRight = visible.grid.right;
+  const title = (name) => ({ bOverride: true, name, location: 'Middle', gap: 50, fontSize: 28 });
+  assert.equal(host.setAxisSettingsBase64(1, encodePayload({ x2D: title('X'), y2D: title('Y'), xSide: 'Top', ySide: 'Right' })), true);
+  assert.equal(visible.grid.containLabel, true);
+  assert.ok(visible.grid.top >= 78); assert.ok(visible.grid.right >= 78);
+  assert.equal(host.setAxisSettingsBase64(2, encodePayload({})), true);
+  assert.equal(visible.grid.top, originalTop); assert.equal(visible.grid.right, originalRight);
+});
+
+test('real ECharts restores default and explicit grid margins after axis side reset', () => {
+  const state = createHostContext();
+  const chart = echarts.init(null, null, { renderer: 'svg', ssr: true, width: 640, height: 400 });
+  state.window.echarts.init = () => chart;
+  state.window.UEEChartsTemplates.createTemplate = () => ({ requestedTemplate: 'SegmentedAreaLine', effectiveTemplate: 'SegmentedAreaLine',
+    option: { grid: {}, xAxis: { type: 'value' }, yAxis: { type: 'value' }, series: [{ type: 'line', data: [[1, 2]] }] } });
+  const title = { bOverride: true, name: 'Long name', location: 'Middle', gap: 200, fontSize: 72 };
+  try {
+    vm.runInContext(hostSource, state.context); const host = state.window.UEEChartsHost;
+    host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+    const before = chart.getOption().grid[0];
+    const beforeRect = chart.getModel().getComponent('grid', 0).coordinateSystem.getRect();
+    assert.equal(host.setAxisSettingsBase64(1, encodePayload({ x2D: title, y2D: title, xSide: 'Top', ySide: 'Right' })), true, state.logs.join('\n'));
+    assert.ok(chart.getOption().grid[0].top >= 296); assert.ok(chart.getOption().grid[0].right >= 296);
+    assert.equal(host.setAxisSettingsBase64(2, encodePayload({})), true);
+    assert.equal(chart.getOption().grid[0].top, before.top); assert.equal(chart.getOption().grid[0].right, before.right);
+    const afterRect = chart.getModel().getComponent('grid', 0).coordinateSystem.getRect();
+    assert.equal(afterRect.width, beforeRect.width); assert.equal(afterRect.height, beforeRect.height);
+  } finally { chart.dispose(); }
+});
+
+test('CustomOption missing grid and percent margins reserve side title space without losing originals', () => {
+  const state = createHostContext(); let visible = {};
+  state.chartElement.clientWidth = 800; state.chartElement.clientHeight = 600;
+  state.window.UEEChartsTemplates = Object.assign({}, templates);
+  state.window.echarts.init = () => ({ clear() { visible = {}; }, resize() {}, dispose() {},
+    setOption(option) { visible = Object.assign({}, visible, JSON.parse(JSON.stringify(option))); }, getOption() { return JSON.parse(JSON.stringify(visible)); } });
+  vm.runInContext(hostSource, state.context); const host = state.window.UEEChartsHost;
+  host.renderTemplate('SegmentedAreaLine', {}, 'ClickOnly');
+  const title = { bOverride: true, name: 'A', location: 'Middle', gap: 60, fontSize: 30 };
+  assert.equal(host.applyOptionBase64(1, encodePayload({ xAxis: {}, yAxis: {}, series: [] })), true);
+  assert.equal(host.setAxisSettingsBase64(2, encodePayload({ x2D: title, y2D: title, xSide: 'Top', ySide: 'Right' })), true);
+  assert.equal(visible.grid.containLabel, true); assert.ok(visible.grid.top >= 114); assert.ok(visible.grid.right >= 114);
+  assert.equal(host.setAxisSettingsBase64(3, encodePayload({})), true);
+  assert.equal(visible.grid.containLabel, false);
+  assert.equal(host.applyOptionBase64(4, encodePayload({ grid: { top: '10%', right: '40%' }, xAxis: {}, yAxis: {}, series: [] })), true);
+  assert.equal(host.setAxisSettingsBase64(5, encodePayload({ x2D: title, y2D: title, xSide: 'Top', ySide: 'Right' })), true);
+  assert.ok(visible.grid.top >= 114); assert.equal(visible.grid.right, '40%');
+  assert.equal(host.setAxisSettingsBase64(6, encodePayload({})), true);
+  assert.equal(visible.grid.top, '10%'); assert.equal(visible.grid.right, '40%');
+});
+
 test('payload validation rejects empty serialized series before ColorValue range calculation', () => {
   const state = createHostContext(); vm.runInContext(hostSource, state.context); state.window.UEEChartsHost.renderTemplate('Bar3DHeightMap', {}, 'ClickOnly');
   assert.equal(state.window.UEEChartsHost.applyDataBase64(encodePayload({ revision: 1, template: 'Bar3DHeightMap', xAxisMode: 'ShowAll', series: [{ index: 0, name: 'Empty', type: 'data3D', data: [] }] })), false);

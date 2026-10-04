@@ -33,6 +33,7 @@ namespace
 	const FString OptionResultMarker = TEXT("__UE_ECHARTS_OPTION_RESULT__:");
 	const FString InteractionResultMarker = TEXT("__UE_ECHARTS_INTERACTION_RESULT__:");
 	const FString LegendResultMarker = TEXT("__UE_ECHARTS_LEGEND_RESULT__:");
+	const FString AxisResultMarker = TEXT("__UE_ECHARTS_AXIS_RESULT__:");
 	const FString JavaScriptResultMarker = TEXT("__UE_ECHARTS_JAVASCRIPT_RESULT__:");
 	constexpr int32 MaxOptionJsonBytes = 16 * 1024 * 1024;
 	constexpr int32 MaxJavaScriptBytes = 1024 * 1024;
@@ -183,6 +184,56 @@ namespace
 		const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
 		if (!FJsonSerializer::Serialize(Json, Writer)) return FString();
 		const FTCHARToUTF8 Utf8(*Text);
+		return FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+	}
+
+	FEChartsAxisSettings ClampAxisSettings(const FEChartsAxisSettings& Input)
+	{
+		FEChartsAxisSettings Result = Input;
+		for (FEChartsAxisTitleSettings* Title : { &Result.X2D, &Result.Y2D, &Result.X3D, &Result.Y3D, &Result.Z3D })
+		{
+			Title->Gap = FMath::IsFinite(Title->Gap) ? FMath::Clamp(Title->Gap, 0.0f, 200.0f) : 20.0f;
+			Title->FontSize = FMath::Clamp(Title->FontSize, 6, 72);
+		}
+		return Result;
+	}
+
+	const TCHAR* AxisLocationName(const EEChartsAxisNameLocation Value)
+	{
+		switch (Value)
+		{
+		case EEChartsAxisNameLocation::Start: return TEXT("Start");
+		case EEChartsAxisNameLocation::End: return TEXT("End");
+		default: return TEXT("Middle");
+		}
+	}
+
+	FString EncodeAxisSettings(const FEChartsAxisSettings& Settings)
+	{
+		TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+		const auto AddTitle = [&Json](const TCHAR* Key, const FEChartsAxisTitleSettings& Title)
+		{
+			TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+			Value->SetBoolField(TEXT("bOverride"), Title.bOverride);
+			Value->SetStringField(TEXT("name"), Title.Name);
+			Value->SetStringField(TEXT("location"), AxisLocationName(Title.Location));
+			Value->SetNumberField(TEXT("gap"), Title.Gap);
+			Value->SetNumberField(TEXT("fontSize"), Title.FontSize);
+			Json->SetObjectField(Key, Value);
+		};
+		AddTitle(TEXT("x2D"), Settings.X2D);
+		AddTitle(TEXT("y2D"), Settings.Y2D);
+		AddTitle(TEXT("x3D"), Settings.X3D);
+		AddTitle(TEXT("y3D"), Settings.Y3D);
+		AddTitle(TEXT("z3D"), Settings.Z3D);
+		Json->SetStringField(TEXT("xSide"), Settings.XSide == EEChartsXAxisSide::Top ? TEXT("Top") :
+			Settings.XSide == EEChartsXAxisSide::Bottom ? TEXT("Bottom") : TEXT("Auto"));
+		Json->SetStringField(TEXT("ySide"), Settings.YSide == EEChartsYAxisSide::Left ? TEXT("Left") :
+			Settings.YSide == EEChartsYAxisSide::Right ? TEXT("Right") : TEXT("Auto"));
+		FString Serialized;
+		const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Serialized);
+		if (!FJsonSerializer::Serialize(Json, Writer)) return FString();
+		const FTCHARToUTF8 Utf8(*Serialized);
 		return FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
 	}
 }
@@ -808,8 +859,10 @@ void UEChartsWidget::ClearPendingAdvancedRequests(const bool bPreserveOptionCand
 	PendingOptionRequestId = 0;
 	PendingInteractionRequestId = 0;
 	PendingLegendRequestId = 0;
+	PendingAxisRequestId = 0;
 	bInteractionModeQueued = false;
 	bLegendSettingsQueued = false;
+	bAxisSettingsQueued = false;
 	PendingJavaScriptRequests.Reset();
 }
 
@@ -952,6 +1005,35 @@ void UEChartsWidget::ResetLegendSettings()
 	SetLegendSettings(FEChartsLegendSettings{});
 }
 
+void UEChartsWidget::SendAxisSettings()
+{
+	if (RuntimeState != EEChartsRuntimeState::Ready || PendingAxisRequestId != 0) return;
+	const FString Encoded = EncodeAxisSettings(RequestedAxisSettings);
+	if (Encoded.IsEmpty()) return;
+	PendingAxisRequestId = AllocateAdvancedRequestId();
+	InFlightAxisSettings = RequestedAxisSettings;
+	bAxisSettingsQueued = false;
+	bAxisReplayPending = true;
+	ExecuteJavascript(FEChartsWidgetJavascript::BuildSetAxisSettingsCommand(PendingAxisRequestId, Encoded));
+}
+
+void UEChartsWidget::SetAxisSettings(const FEChartsAxisSettings& Settings)
+{
+	if (!IsGameThreadMutation()) return;
+	RequestedAxisSettings = ClampAxisSettings(Settings);
+	bAxisReplayPending = true;
+	if (RuntimeState == EEChartsRuntimeState::Ready)
+	{
+		if (PendingAxisRequestId != 0) bAxisSettingsQueued = InFlightAxisSettings != RequestedAxisSettings;
+		else SendAxisSettings();
+	}
+}
+
+void UEChartsWidget::ResetAxisSettings()
+{
+	SetAxisSettings(FEChartsAxisSettings{});
+}
+
 bool UEChartsWidget::SetEChartsOptionJSON(const FString& OptionJson)
 {
 	if (!IsGameThreadMutation() || OptionJson.TrimStartAndEnd().IsEmpty()) return false;
@@ -1012,6 +1094,7 @@ void UEChartsWidget::InitializeECharts(
 	InteractionMode = InInteractionMode;
 	bInteractionReplayPending = true;
 	bLegendReplayPending = true;
+	bAxisReplayPending = true;
 	bOptionReplayPending = Template == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	bHasInitialized = true;
 	bReloadOnRebuild = false;
@@ -1029,6 +1112,7 @@ void UEChartsWidget::BeginLoadGeneration()
 	}
 	bInteractionReplayPending = true;
 	bLegendReplayPending = true;
+	bAxisReplayPending = true;
 	bOptionReplayPending = CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (IsStreamingActive()) InvalidateStreamDelta();
 	if (InFlightRevision != 0)
@@ -1086,6 +1170,7 @@ void UEChartsWidget::ReleaseSlateResources(const bool bReleaseChildren)
 	}
 	bInteractionReplayPending = bHasInitialized;
 	bLegendReplayPending = bHasInitialized;
+	bAxisReplayPending = bHasInitialized;
 	bOptionReplayPending = bHasInitialized && CurrentTemplate == EEChartsTemplate::CustomOption && !CachedOptionBase64.IsEmpty();
 	if (InFlightRevision != 0)
 	{
@@ -1159,6 +1244,7 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 			SendPendingOrCachedOption();
 			if (bInteractionReplayPending) SendInteractionMode();
 			if (bLegendReplayPending) SendLegendSettings();
+			if (bAxisReplayPending) SendAxisSettings();
 			OnChartReady.Broadcast();
 			if (bApplyRequested)
 			{
@@ -1357,6 +1443,28 @@ void UEChartsWidget::HandleEChartsConsoleMessage(
 		return;
 	}
 
+	if (Message.StartsWith(AxisResultMarker))
+	{
+		uint64 MessageGeneration = 0;
+		uint64 RequestId = 0;
+		bool bSuccess = false;
+		FString Detail;
+		if (TryParseAdvancedResult(Message.RightChop(AxisResultMarker.Len()), MessageGeneration, RequestId, bSuccess, Detail) &&
+			MessageGeneration == LoadGeneration && RequestId == PendingAxisRequestId && RuntimeState == EEChartsRuntimeState::Ready)
+		{
+			const FEChartsAxisSettings AppliedSettings = InFlightAxisSettings;
+			const bool bSendLatest = bAxisSettingsQueued || AppliedSettings != RequestedAxisSettings;
+			PendingAxisRequestId = 0;
+			bAxisSettingsQueued = false;
+			if (bSuccess) AxisSettings = AppliedSettings;
+			else if (!bSendLatest) RequestedAxisSettings = AxisSettings;
+			bAxisReplayPending = !bSuccess && !bSendLatest;
+			OnAxisSettingsApplied.Broadcast(bSuccess, Detail);
+			if (bSendLatest && PendingAxisRequestId == 0) SendAxisSettings();
+		}
+		return;
+	}
+
 	if (Message.StartsWith(JavaScriptResultMarker))
 	{
 		uint64 MessageGeneration = 0;
@@ -1505,6 +1613,12 @@ FString FEChartsWidgetJavascript::BuildSetLegendSettingsCommand(
 		TEXT("window.UEEChartsHost.setLegendSettingsBase64(%llu,\"%s\");"),
 		RequestId,
 		*PayloadBase64);
+}
+
+FString FEChartsWidgetJavascript::BuildSetAxisSettingsCommand(const uint64 RequestId, const FString& PayloadBase64)
+{
+	if (RequestId == 0 || RequestId > 9007199254740991ULL || !IsStrictBase64(PayloadBase64)) return FString();
+	return FString::Printf(TEXT("window.UEEChartsHost.setAxisSettingsBase64(%llu,\"%s\");"), RequestId, *PayloadBase64);
 }
 
 FString FEChartsWidgetJavascript::BuildExecuteJavaScriptCommand(const uint64 RequestId, const FString& PayloadBase64)

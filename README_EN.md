@@ -94,6 +94,12 @@ Blueprint example: `Set 2D Point Window(true, 100)` → `Set Auto Apply Enabled(
 
 `Set Legend Settings(Settings)` and `Reset Legend Settings()` are under `ECharts|Legend`. `FEChartsLegendSettings` defaults to visible, Auto position/orientation, font size 12, gap 10, icon 25×14, and Custom X/Y 50%/5%. C++ clamps these values again. Auto uses a centered horizontal top legend at widths ≥720 CSS px and a vertical right legend below that threshold. Top/Bottom/Left/Right/Custom and Horizontal/Vertical provide explicit overrides. Settings are transactional: Blueprint Read Only state changes only after a successful `On Legend Settings Applied` ACK; failure preserves last-good settings. The latest requested candidate is cached during Loading and replayed after Release/Rebuild without Tick or polling. Blueprint legend settings remain the final override even when CustomOption supplies its own legend object or array.
 
+### Axis titles and sides
+
+`Set Axis Settings(Settings)` and `Reset Axis Settings()` are under `ECharts|Axis`. In Blueprint, use `Make ECharts Axis Settings` and connect a `Make ECharts Axis Title Settings` for any of `X2D`, `Y2D`, `X3D`, `Y3D`, and `Z3D`. Check `bOverride` for each title you want to change; set `Name`, `Location` (Start/Middle/End), `Gap`, and `FontSize`. An unchecked title preserves the template or CustomOption value. An enabled override with an empty Name hides the original title. Gap clamps to 0–200 and FontSize to 6–72. `XSide` offers Auto/Top/Bottom and `YSide` offers Auto/Left/Right; Auto preserves the source axis side. Top and Right reserve room in the 2D grid, and Reset restores the source layout.
+
+For 2D axes, Location places the title along its axis and Gap controls its distance from the axis. A 3D title belongs to the cube axis and rotates with the camera; arbitrary screen pixel placement is unavailable. Settings apply only to axes already present in the option, so a WebGL fallback does not acquire 3D axes. Blueprint axis settings take final precedence over CustomOption, including its timeline and media sub-options, and persist through data Apply and Release/Rebuild. The Blueprint Read Only `Axis Settings` property holds the last successful ACK. You may call Set while Loading; it is sent when Ready. `On Axis Settings Applied(Success, Message)` reports the result. Failure retains the last successful settings; rapid calls keep the latest candidate. Reset also waits for ACK.
+
 There is no history database, playback cache, or `Set History Capacity` API. Both point-window APIs retain only their current in-memory window; keep long-term history in the game's own data layer.
 
 ### Interaction
@@ -117,6 +123,7 @@ Important events:
 - `On ECharts Applied(Revision, Point Count)`
 - `On Interaction Mode Applied(Mode, Success, Message)`
 - `On Legend Settings Applied(Success, Message)`
+- `On Axis Settings Applied(Success, Message)`
 - `On Option Applied(Success, Message)`
 - `On JavaScript Result(Request Id, Success, Message)`
 - `On Data Table Load Progress`, `On Data Table Loaded`, `On Data Table Load Cancelled`

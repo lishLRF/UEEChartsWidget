@@ -185,9 +185,15 @@ Blueprint 示例：`Set 2D Point Window(true, 100)` → `Set Auto Apply Enabled(
 
 `Set Legend Settings(Settings)` 与 `Reset Legend Settings()` 位于 `ECharts|Legend`。`FEChartsLegendSettings` 默认显示图例，位置/方向均为 Auto，字号 12、间距 10、图标 25×14、Custom X/Y 为 50%/5%；数值会按 Blueprint 元数据范围在 C++ 再次夹紧。Auto 在宽度 ≥720 CSS px 时顶部居中横排，窄窗口在右侧纵排；Top/Bottom/Left/Right/Custom 和 Horizontal/Vertical 可显式覆盖。设置采用事务语义：Blueprint Read Only 状态只在 `On Legend Settings Applied` 成功 ACK 后更新，失败保留 last-good；最新候选会在 Loading 与 Release/Rebuild 后重放，不使用 Tick 或轮询。即使 CustomOption 自带 legend object/array，Blueprint Legend Settings 仍是最终覆盖层。
 
+### 5.5 坐标轴标题与侧边
+
+`Set Axis Settings(Settings)` 与 `Reset Axis Settings()` 位于 `ECharts|Axis`。在蓝图中使用 `Make ECharts Axis Settings`，分别为 `X2D`、`Y2D`、`X3D`、`Y3D`、`Z3D` 接入 `Make ECharts Axis Title Settings`；需要修改的标题勾选 `bOverride`，填写 `Name`、`Location`（Start/Middle/End）、`Gap` 与 `FontSize`。未勾选的轴保留模板或 CustomOption 原值；勾选且 Name 为空会隐藏原标题。Gap 夹紧至 0–200，FontSize 夹紧至 6–72。`XSide` 可选 Auto/Top/Bottom，`YSide` 可选 Auto/Left/Right；Auto 保留原轴侧。Top/Right 会为二维标题预留网格空间，Reset 恢复原网格布局。
+
+二维 `Location` 沿轴线定位标题，`Gap` 控制标题到轴的距离；三维标题位于立方体轴上，会随视角旋转，不能指定任意屏幕像素坐标。设置仅作用于当前 option 中存在的轴，WebGL 回退至二维时不会创建三维轴。它是 CustomOption 及其 timeline/media 子 option 的最终轴覆盖层，数据 Apply 和 Release/Rebuild 后仍有效。`Axis Settings` 是最近一次成功 ACK 的 Blueprint Read Only 值；Loading 时可调用设置节点，Ready 后发送，`On Axis Settings Applied(Success, Message)` 返回结果。失败保留上次成功设置；连续调用以最新候选为准。Reset 也需等待 ACK。
+
 无效索引、类型冲突、NaN/Infinity、空分类、总点数或 JSON 超限会返回 false/广播错误；批量 Set/Append 不会半写入。
 
-### 5.5 DataTable API
+### 5.6 DataTable API
 
 | 节点 | 返回/说明 |
 | --- | --- |
@@ -196,7 +202,7 @@ Blueprint 示例：`Set 2D Point Window(true, 100)` → `Set Auto Apply Enabled(
 | `Load Data Table(Rows Per Frame=256)` | `void`；预算夹紧 1–4096；分帧读取、worker 排序/转换/序列化，安装到 Series 0 并自动 Apply。 |
 | `Cancel Data Table Load()` | `void`；取消 Reading/Processing/Applying，并尽可能恢复加载前 Series 0/轴。 |
 
-### 5.6 Streaming API
+### 5.7 Streaming API
 
 | 节点 | 返回/说明 |
 | --- | --- |
@@ -207,9 +213,9 @@ Blueprint 示例：`Set 2D Point Window(true, 100)` → `Set Auto Apply Enabled(
 | `Resume Data Table Streaming()` | `void`；仅 Paused 有效。 |
 | `Stop Data Table Streaming()` | `void`；停止并释放准备缓存，保留显示窗口。 |
 
-### 5.7 状态与事件
+### 5.8 状态与事件
 
-核心 Blueprint Read Only：`Current Template`、`Interaction Mode`、`Runtime State`、`Last Error`、`Last Warning`、`Effective Template`、`X Axis Mode`、`Is Dirty`、`Last Applied Revision/Point Count`、`Auto Apply Enabled/Max Updates Per Second`、`2D Point Window Enabled/Max 2D Point Window Points`。
+核心 Blueprint Read Only：`Current Template`、`Interaction Mode`、`Runtime State`、`Last Error`、`Last Warning`、`Effective Template`、`X Axis Mode`、`Axis Settings`、`Is Dirty`、`Last Applied Revision/Point Count`、`Auto Apply Enabled/Max Updates Per Second`、`2D Point Window Enabled/Max 2D Point Window Points`。
 
 DataTable 状态：`Idle / Reading / Processing / Applying / Completed / Error / Cancelled`，以及 `Rows Processed/Succeeded/Skipped/Total Rows`、`Last Data Table Error`。
 
@@ -223,6 +229,7 @@ Stream 状态：`Stopped / Preparing / Playing / Paused / Completed / Error`，�
 | `On ECharts Applied` | `Revision, Point Count`；浏览器 ACK。 |
 | `On Interaction Mode Applied` | `Mode, Success, Message`。 |
 | `On Legend Settings Applied` | `Success, Message`；成功才提交 Blueprint Read Only 设置。 |
+| `On Axis Settings Applied` | `Success, Message`；成功才提交 Blueprint Read Only 轴设置。 |
 | `On Option Applied` | `Success, Message`。 |
 | `On JavaScript Result` | `Request Id, Success, Message`。 |
 | `On Data Table Load Progress` | `Processed, Total`。 |
@@ -530,7 +537,7 @@ Loop 不清空，首行继续追加；`Streamed Rows` 是累计数，`Current Ro
 | 性能 | Auto Apply 5–10 Hz、缩窗口、合批；3D 降点/频；降低 RowsPerFrame。 |
 | Raw JS | 仅 Ready；对应 Request ID/Result；不要关闭 CSP 或绑定 UObject。 |
 
-日志搜索 `__UE_ECHARTS_`。前缀包括 `READY`、`RENDERED`、`WARNING`、`ERROR`、`APPLIED`、`OPTION_RESULT`、`INTERACTION_RESULT`、`JAVASCRIPT_RESULT`，后带 generation/revision/request id。不要从 Blueprint 伪造 marker。
+日志搜索 `__UE_ECHARTS_`。前缀包括 `READY`、`RENDERED`、`WARNING`、`ERROR`、`APPLIED`、`OPTION_RESULT`、`INTERACTION_RESULT`、`LEGEND_RESULT`、`AXIS_RESULT`、`JAVASCRIPT_RESULT`，后带 generation/revision/request id。不要从 Blueprint 伪造 marker。
 
 ## 14. FAQ
 
