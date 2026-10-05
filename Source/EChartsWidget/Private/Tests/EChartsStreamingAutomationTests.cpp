@@ -570,6 +570,7 @@ class FEChartsStreamCEFCommand : public IAutomationLatentCommand
         Expected += TEXT("]"); Categories += TEXT("]");
         Test->TestEqual(bFinal ? TEXT("Final window length") : TEXT("First visible row length"), Count, bFinal ? 3 : 1);
         FString Condition = FString::Printf(TEXT("o.series[0].data.length<=3&&JSON.stringify(o.series[0].data)==='%s'"), *Expected);
+        if (Mode == 0) Condition += TEXT("&&o.xAxis[0].scale===true");
         if (Mode == 1) Condition += FString::Printf(TEXT("&&JSON.stringify(o.xAxis[0].data)==='%s'"), *Categories);
         W->ExecuteJavascript(FString::Printf(TEXT("(function(){var o=window.UEEChartsHost.getOptionForTesting();console.log('__UE_ECHARTS_TEST_DATA_OPTION__:1:'+((%s)?'OK':'BAD'));}());"), *Condition));
     }

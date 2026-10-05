@@ -308,6 +308,12 @@ bool UEChartsWidget::HasActive2DPointWindow() const
 	return false;
 }
 
+bool UEChartsWidget::ShouldAutoScale2DAxes() const
+{
+	return HasActive2DPointWindow() ||
+		(IsStreamingActive() && SeriesData[0].Num() > 0 && Is2DSeriesType(SeriesData[0].Type));
+}
+
 void UEChartsWidget::ReportDataError(const FString& Message)
 {
 	LastError = Message;
@@ -707,7 +713,7 @@ void UEChartsWidget::SubmitLatestData()
 	const EEChartsTemplate Template = CurrentTemplate;
 	const EEChartsXAxisMode AxisMode = XAxisMode;
 	const bool bPreserveOrder = bPreserveStreamCategoryOrder;
-	const bool bPointWindow2D = HasActive2DPointWindow();
+	const bool bPointWindow2D = ShouldAutoScale2DAxes();
 	auto Snapshot = SeriesData;
 	bPayloadBuildInFlight = true;
 	PayloadBuildRevision = Revision;
@@ -754,7 +760,7 @@ void UEChartsWidget::SubmitLatestData()
 			if (Generation != Widget->LoadGeneration || Revision != Widget->DataRevision ||
 				Template != Widget->CurrentTemplate || AxisMode != Widget->XAxisMode ||
 				bPreserveOrder != Widget->bPreserveStreamCategoryOrder ||
-				bPointWindow2D != Widget->HasActive2DPointWindow())
+				bPointWindow2D != Widget->ShouldAutoScale2DAxes())
 			{
 				Widget->bApplyRequested = true;
 				Widget->SubmitLatestData();

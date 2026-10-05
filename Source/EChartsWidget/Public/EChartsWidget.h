@@ -370,6 +370,7 @@ private:
 	int32 GetSeriesPointLimit(int32 SeriesIndex, EEChartsSeriesDataType Type) const;
 	bool ApplyConfiguredRing(int32 SeriesIndex);
 	bool HasActive2DPointWindow() const;
+	bool ShouldAutoScale2DAxes() const;
 	void MarkDataChanged();
 	void ReportDataError(const FString& Message);
 	void SubmitLatestData();

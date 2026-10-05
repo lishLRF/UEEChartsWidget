@@ -144,6 +144,8 @@ Date text in String/Name/Text is a category label; it is not parsed. Use numeric
 
 `FEChartsDataTableMapping` fields are `X, Y, Z, Color, SymbolSize, Order`. 2D requires supported X and numeric Y. 3D requires numeric X/Y/Z; Color and SymbolSize are optional numeric fields. Defaults are `ColorValue=Z` and `SymbolSizeValue=12`. `XAscending` is stable numeric ascending or case-sensitive category lexical order; `RowName` follows FName plain-name/number ordering.
 
+For manual per-frame `Add Data Point` / `Add Category Data Point`, enable `Set 2D Point Window(true, N)` before adding points. `Set Time Series Window` applies only to `Start Data Table Streaming`, not manual adds. For DataTable playback, map the table, enable Time Series, set its window, then start streaming; do not call `Load Data Table` first. Numeric 2D stream axes now rescale to the retained window. `Rows Per Step=1` means one row per timer step, not a guarantee of one visible browser update per Unreal frame; browser acknowledgement may apply backpressure.
+
 For a Blueprint-authored Structure, enter the visible column names shown in the DataTable (for example `X` and `Y`). Existing mappings using generated internal names remain valid. `Get ECharts DataTable Columns` lists the names and types that can be mapped.
 
 ```text

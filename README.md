@@ -317,6 +317,27 @@ On Data Table Loaded(Succeeded, Skipped)
 
 ## 7. Snapshot 与 Time Series
 
+### 7.1 两种“最新 N 点窗口”不要混用
+
+- **蓝图自己逐帧调用 `Add Data Point` / `Add Category Data Point`**：在开始插点前调用 `Set 2D Point Window(Enabled=true, Max Points=N)`。`Set Time Series Enabled` 和 `Set Time Series Window` 不限制这类手动插点。2D 点数窗口会从显示与缓存中同时淘汰最早点，Numeric X 轴随保留点自动缩放；`Data3D` 不受影响。
+- **插件读取 DataTable 并逐步显示**：先 `Set DataTable Mapping`，再 `Set Time Series Enabled(true)`、`Set Time Series Window(N)`、`Start Data Table Streaming(Interval Seconds, Rows Per Step=1, Loop, Preparation Rows Per Frame)`。这里不要先调用 `Load Data Table`，否则会额外触发整表快照加载。流式窗口只控制 Series 0，Numeric X 轴随保留点自动缩放，3D 图仍保留自己的轴规则。
+
+两种窗口各自独立；把 `Set Time Series Window` 接到手动 `Add Data Point` 流程，窗口不会生效。`Rows Per Step=1` 是每次定时推进一行，不保证严格每个 UE 帧或每次 CEF 重绘都恰好显示一行；CEF 尚未确认上一批时会背压等待，不会阻塞游戏线程。
+
+手动逐帧插点的蓝图顺序示例：
+
+```text
+Event Construct → Initialize ECharts(SegmentedAreaLine)
+               → Set 2D Point Window(true, 10)
+               → Get Data Table Row Names(你的表) → 保存行名数组；当前索引=0
+Event Tick      → 若当前索引 < 行名数组长度：取 行名数组[当前索引]
+               → Get Data Table Row → Break X/Y 行结构
+               → Add Data Point(Series Index=0, X, Y)
+               → 当前索引 + 1（到表尾时停止或自行循环）
+```
+
+只在开始时取得一次行名数组，不要每帧重新扫描 DataTable。`Add Data Point` 默认受 Auto Apply 速率限制（最高 30 次/秒）；若必须控制提交时机，可关闭 Auto Apply 并在合适的帧调用 `Apply ECharts Changes`，但浏览器渲染仍是异步的。需要按固定时间间隔渐进显示，优先使用内置 Streaming。
+
 | 模式 | Snapshot | Time Series |
 | --- | --- | --- |
 | 入口 | `Load Data Table` | Enable + `Start Data Table Streaming` |
